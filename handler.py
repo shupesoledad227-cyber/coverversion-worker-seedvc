@@ -223,18 +223,34 @@ def separate_vocals(song_path: str, output_dir: str):
     return vocals_path, instrumental_path
 
 
+# 可选模型版本
+MODEL_VERSIONS = {
+    "standard": "DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned_ema.pth",
+    "fine_tuned": "DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned_ft_ema.pth",
+    "fine_tuned_v2": "DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned_ft_ema_v2.pth",
+}
+
+
 def run_seed_vc_direct(source_path: str, target_path: str, output_path: str,
                        pitch_shift: int = 0, diffusion_steps: int = 25,
-                       cfg_rate: float = 0.7):
+                       cfg_rate: float = 0.7, model_version: str = "standard"):
     """
     Run Seed-VC inference via subprocess.
-    cfg_rate: 音色还原度 (0.0=偏原唱, 1.0=高度还原用户声音, 推荐0.7)
+    model_version: "standard" / "fine_tuned" / "fine_tuned_v2"
     """
+    # Resolve checkpoint path
+    ckpt_name = MODEL_VERSIONS.get(model_version, MODEL_VERSIONS["standard"])
+    ckpt_path = os.path.join(SEED_VC_DIR, "checkpoints", "Seed-VC", ckpt_name)
+    config_path = os.path.join(SEED_VC_DIR, "configs", "presets", "config_dit_mel_seed_uvit_whisper_base_f0_44k.yml")
+    print(f"[Inference] Model: {model_version} → {ckpt_name}")
+
     cmd = [
         "python", os.path.join(SEED_VC_DIR, "inference.py"),
         "--source", source_path,
         "--target", target_path,
         "--output", os.path.dirname(output_path),
+        "--checkpoint", ckpt_path,
+        "--config", config_path,
         "--diffusion-steps", str(diffusion_steps),
         "--length-adjust", "1.0",
         "--inference-cfg-rate", str(cfg_rate),
@@ -330,10 +346,12 @@ def handler(job):
     vocal_volume = float(job_input.get("vocal_volume", 1.1))    # 人声音量（默认略突出）
     instrumental_volume = float(job_input.get("instrumental_volume", 0.9))  # 伴奏音量
     reverb = float(job_input.get("reverb", 0.25))              # 混响（默认轻微KTV感）
+    model_version = job_input.get("model_version", "standard")   # 模型版本
 
     print(f"\n{'='*60}")
     print(f"[Job] task_id={task_id}, pitch={pitch_shift}, steps={diffusion_steps}")
     print(f"[Job] cfg_rate={cfg_rate}, vocal_vol={vocal_volume}, inst_vol={instrumental_volume}, reverb={reverb}")
+    print(f"[Job] model={model_version}")
     print(f"{'='*60}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -381,7 +399,8 @@ def handler(job):
                 vocals_path, voice_path, converted_vocals,
                 pitch_shift=pitch_shift,
                 diffusion_steps=diffusion_steps,
-                cfg_rate=cfg_rate
+                cfg_rate=cfg_rate,
+                model_version=model_version
             )
             conversion_time = time.time() - t
             print(f"[Job] Conversion: {conversion_time:.1f}s")
