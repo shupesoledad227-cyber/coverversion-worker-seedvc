@@ -169,22 +169,32 @@ def download_file(url: str, dest_path: str):
     print(f"[Download] Done: {size_mb:.1f} MB")
 
 
-def upload_file(file_path: str, filename: str) -> str:
-    """Upload file to tmpfiles.org and return direct download URL."""
-    print(f"[Upload] Uploading {filename} ({os.path.getsize(file_path) / 1024 / 1024:.1f} MB)...")
-    with open(file_path, "rb") as f:
-        resp = requests.post(
-            "https://tmpfiles.org/api/v1/upload",
-            files={"file": (filename, f, "audio/wav")},
-            timeout=120,
-        )
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("status") != "success":
-        raise RuntimeError(f"Upload failed: {data}")
-    url = data["data"]["url"].replace("tmpfiles.org/", "tmpfiles.org/dl/")
-    print(f"[Upload] Done: {url}")
-    return url
+def upload_file(file_path: str, filename: str, max_retries: int = 3) -> str:
+    """Upload file to tmpfiles.org with retry, return direct download URL."""
+    size_mb = os.path.getsize(file_path) / 1024 / 1024
+    print(f"[Upload] Uploading {filename} ({size_mb:.1f} MB)...")
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            with open(file_path, "rb") as f:
+                resp = requests.post(
+                    "https://tmpfiles.org/api/v1/upload",
+                    files={"file": (filename, f, "audio/wav")},
+                    timeout=120,
+                )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("status") != "success":
+                raise RuntimeError(f"Response not success: {data}")
+            url = data["data"]["url"].replace("tmpfiles.org/", "tmpfiles.org/dl/")
+            print(f"[Upload] Done: {url}")
+            return url
+        except Exception as e:
+            print(f"[Upload] Attempt {attempt}/{max_retries} failed: {e}")
+            if attempt < max_retries:
+                time.sleep(3)  # 等 3 秒重试
+            else:
+                raise RuntimeError(f"Upload failed after {max_retries} attempts: {e}")
 
 
 def separate_vocals(song_path: str, output_dir: str):
