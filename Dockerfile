@@ -33,11 +33,21 @@ RUN pip install --no-cache-dir \
     pyyaml \
     accelerate
 
-# ── NOTE: Model weights will auto-download on first run ──────────
-# Seed-VC inference.py handles downloading checkpoints from HuggingFace
-# automatically. This avoids build failures due to network issues.
-# First cold start will be slower (~2-3 min extra), subsequent runs
-# use RunPod's cached image.
+# ── Pre-download model weights (free during build, not at runtime) ──
+# NOTE: HuggingFace username is "Plachta" (single a), not "Plachtaa"
+
+# Seed-VC checkpoints (~2GB)
+RUN python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('Plachta/Seed-VC', local_dir='/app/seed-vc/checkpoints/Seed-VC'); \
+print('Seed-VC weights downloaded')"
+
+# Whisper-small content encoder (~500MB)
+RUN python -c "\
+from transformers import WhisperModel, WhisperFeatureExtractor; \
+WhisperModel.from_pretrained('openai/whisper-small'); \
+WhisperFeatureExtractor.from_pretrained('openai/whisper-small'); \
+print('Whisper cached')"
 
 # ── Copy handler ─────────────────────────────────────────────────
 COPY handler.py /app/handler.py
