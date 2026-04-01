@@ -76,7 +76,7 @@ def load_all_models():
     print(f"[Init] Device: {DEVICE}, Dtype: {DTYPE}")
 
     # ── Load Seed-VC config ──────────────────────────────────────
-    config_path = os.path.join(SEED_VC_DIR, "configs", "config_dit_mel_seed_uvit_whisper_base_f0_44k.yml")
+    config_path = os.path.join(SEED_VC_DIR, "configs", "presets", "config_dit_mel_seed_uvit_whisper_base_f0_44k.yml")
     with open(config_path, "r") as f:
         dit_config = yaml.safe_load(f)
 
