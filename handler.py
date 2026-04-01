@@ -214,14 +214,12 @@ def separate_vocals(song_path: str, output_dir: str):
 
 
 def run_seed_vc_direct(source_path: str, target_path: str, output_path: str,
-                       pitch_shift: int = 0, diffusion_steps: int = 25):
+                       pitch_shift: int = 0, diffusion_steps: int = 25,
+                       cfg_rate: float = 0.7):
     """
-    Run Seed-VC inference DIRECTLY using preloaded models (no subprocess).
-    This is much faster as models are already in GPU memory.
+    Run Seed-VC inference via subprocess.
+    cfg_rate: 音色还原度 (0.0=偏原唱, 1.0=高度还原用户声音, 推荐0.7)
     """
-    # Still use subprocess for now until we fully integrate the inference pipeline
-    # The key optimization is that subsequent calls within the same worker
-    # will benefit from OS-level caching of model files
     cmd = [
         "python", os.path.join(SEED_VC_DIR, "inference.py"),
         "--source", source_path,
@@ -229,7 +227,7 @@ def run_seed_vc_direct(source_path: str, target_path: str, output_path: str,
         "--output", os.path.dirname(output_path),
         "--diffusion-steps", str(diffusion_steps),
         "--length-adjust", "1.0",
-        "--inference-cfg-rate", "0.7",
+        "--inference-cfg-rate", str(cfg_rate),
         "--f0-condition", "True",
         "--auto-f0-adjust", "True",
         "--semi-tone-shift", str(pitch_shift),
@@ -264,15 +262,42 @@ def run_seed_vc_direct(source_path: str, target_path: str, output_path: str,
     return output_path
 
 
-def mix_audio(vocals_path: str, instrumental_path: str, output_path: str):
-    """Mix converted vocals with original instrumental using ffmpeg."""
-    print(f"[Mix] Mixing vocals + instrumental...")
+def mix_audio(vocals_path: str, instrumental_path: str, output_path: str,
+              vocal_volume: float = 1.0, instrumental_volume: float = 1.0,
+              reverb: float = 0.0):
+    """
+    Mix converted vocals with original instrumental using ffmpeg.
+    vocal_volume: 人声音量 (1.0=原始, 1.3=突出人声)
+    instrumental_volume: 伴奏音量 (1.0=原始, 0.8=压低伴奏)
+    reverb: 混响强度 (0.0=无, 0.3=轻微KTV感, 0.6=强混响)
+    """
+    print(f"[Mix] Mixing: vocal_vol={vocal_volume}, inst_vol={instrumental_volume}, reverb={reverb}")
+
+    # 构建人声滤镜链
+    vocal_filters = [f"volume={vocal_volume}"]
+
+    # 添加混响效果（KTV 感）
+    if reverb > 0:
+        # aecho: in_gain|out_gain|delays(ms)|decays
+        # 轻度混响模拟 KTV 效果
+        delay1 = 60    # 短延迟
+        delay2 = 120   # 中延迟
+        decay1 = round(reverb * 0.5, 2)   # 衰减系数
+        decay2 = round(reverb * 0.3, 2)
+        vocal_filters.append(f"aecho=0.8:0.75:{delay1}|{delay2}:{decay1}|{decay2}")
+        # 加一点高频提升，让声音更亮
+        vocal_filters.append("equalizer=f=3000:t=q:w=1.5:g=2")
+        # 加一点低频温暖感
+        vocal_filters.append("equalizer=f=200:t=q:w=1:g=1")
+
+    vocal_chain = ",".join(vocal_filters)
+
     cmd = [
         "ffmpeg", "-y",
         "-i", vocals_path,
         "-i", instrumental_path,
         "-filter_complex",
-        "[0:a]volume=1.0[v];[1:a]volume=1.0[i];[v][i]amix=inputs=2:duration=longest",
+        f"[0:a]{vocal_chain}[v];[1:a]volume={instrumental_volume}[i];[v][i]amix=inputs=2:duration=longest",
         "-ac", "2", "-ar", "44100",
         output_path,
     ]
@@ -291,9 +316,14 @@ def handler(job):
     voice_url = job_input["voice_url"]
     pitch_shift = int(job_input.get("pitch_shift", 0))
     diffusion_steps = int(job_input.get("diffusion_steps", 25))
+    cfg_rate = float(job_input.get("cfg_rate", 0.7))           # 音色还原度
+    vocal_volume = float(job_input.get("vocal_volume", 1.1))    # 人声音量（默认略突出）
+    instrumental_volume = float(job_input.get("instrumental_volume", 0.9))  # 伴奏音量
+    reverb = float(job_input.get("reverb", 0.25))              # 混响（默认轻微KTV感）
 
     print(f"\n{'='*60}")
     print(f"[Job] task_id={task_id}, pitch={pitch_shift}, steps={diffusion_steps}")
+    print(f"[Job] cfg_rate={cfg_rate}, vocal_vol={vocal_volume}, inst_vol={instrumental_volume}, reverb={reverb}")
     print(f"{'='*60}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -340,7 +370,8 @@ def handler(job):
             run_seed_vc_direct(
                 vocals_path, voice_path, converted_vocals,
                 pitch_shift=pitch_shift,
-                diffusion_steps=diffusion_steps
+                diffusion_steps=diffusion_steps,
+                cfg_rate=cfg_rate
             )
             conversion_time = time.time() - t
             print(f"[Job] Conversion: {conversion_time:.1f}s")
@@ -352,7 +383,10 @@ def handler(job):
 
             t = time.time()
             final_output = os.path.join(tmpdir, "final_cover.wav")
-            mix_audio(converted_vocals, instrumental_path, final_output)
+            mix_audio(converted_vocals, instrumental_path, final_output,
+                      vocal_volume=vocal_volume,
+                      instrumental_volume=instrumental_volume,
+                      reverb=reverb)
             mix_time = time.time() - t
 
             # ── Stage 5: Upload ──────────────────────────────────
