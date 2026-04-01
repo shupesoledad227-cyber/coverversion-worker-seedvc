@@ -94,8 +94,8 @@ def load_all_models():
     # Find checkpoint
     ckpt_dir = os.path.join(SEED_VC_DIR, "checkpoints", "Seed-VC")
     ckpt_candidates = [
+        os.path.join(ckpt_dir, "DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned_ema.pth"),
         os.path.join(ckpt_dir, "DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned.pth"),
-        os.path.join(ckpt_dir, "DiT_uvit_tat_xlsr_ema.pth"),
     ]
     ckpt_path = None
     for c in ckpt_candidates:
