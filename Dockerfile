@@ -31,7 +31,8 @@ RUN pip install --no-cache-dir \
     numpy==1.26.4 \
     hydra-core==1.3.2 \
     pyyaml \
-    accelerate
+    accelerate \
+    demucs
 
 # ── Pre-download model weights (free during build, not at runtime) ──
 # NOTE: HuggingFace username is "Plachta" (single a), not "Plachtaa"
