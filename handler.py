@@ -303,18 +303,27 @@ def mix_audio(vocals_path: str, instrumental_path: str, output_path: str,
     vocal_filters = [f"volume={vocal_volume}"]
 
     # 添加混响效果（KTV 感）
+    # 使用多层长延迟+低衰减模拟真实空间混响，而非短延迟颤音
     if reverb > 0:
-        # aecho: in_gain|out_gain|delays(ms)|decays
-        # 轻度混响模拟 KTV 效果
-        delay1 = 60    # 短延迟
-        delay2 = 120   # 中延迟
-        decay1 = round(reverb * 0.5, 2)   # 衰减系数
-        decay2 = round(reverb * 0.3, 2)
-        vocal_filters.append(f"aecho=0.8:0.75:{delay1}|{delay2}:{decay1}|{decay2}")
-        # 加一点高频提升，让声音更亮
-        vocal_filters.append("equalizer=f=3000:t=q:w=1.5:g=2")
-        # 加一点低频温暖感
-        vocal_filters.append("equalizer=f=200:t=q:w=1:g=1")
+        # 混响 = 多个不同延迟的回声叠加，模拟房间反射
+        # 延迟 80-300ms 模拟中等大小房间，衰减控制回响持续时间
+        d1, d2, d3, d4 = 87, 199, 311, 443  # 质数延迟避免共振
+        strength = min(reverb, 0.8)
+        dec1 = round(0.25 + strength * 0.35, 2)  # 0.25-0.53
+        dec2 = round(0.15 + strength * 0.30, 2)  # 0.15-0.39
+        dec3 = round(0.10 + strength * 0.20, 2)  # 0.10-0.26
+        dec4 = round(0.05 + strength * 0.15, 2)  # 0.05-0.17
+        # in_gain=0.8 保持原声清晰，out_gain 随混响强度增大
+        out_gain = round(0.6 + strength * 0.3, 2)
+        vocal_filters.append(
+            f"aecho=0.8:{out_gain}:{d1}|{d2}|{d3}|{d4}:{dec1}|{dec2}|{dec3}|{dec4}"
+        )
+        # 高频提亮：让声音更通透
+        vocal_filters.append("equalizer=f=4000:t=q:w=1.2:g=3")
+        # 中高频增强：增加声音存在感
+        vocal_filters.append("equalizer=f=2500:t=q:w=1.5:g=1.5")
+        # 低频温暖感
+        vocal_filters.append("equalizer=f=250:t=q:w=1:g=1")
 
     vocal_chain = ",".join(vocal_filters)
 
