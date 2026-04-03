@@ -1,5 +1,5 @@
 # ── Seed-VC RunPod Serverless Worker ──────────────────────────────
-FROM runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 WORKDIR /app
 
@@ -28,6 +28,9 @@ RUN pip install --no-cache-dir \
     accelerate \
     demucs \
     pedalboard
+
+# Upgrade torch to 2.6 for RTX 5090 support (CUDA 12.4 compatible)
+RUN pip install --no-cache-dir torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 
 # ── Pre-generate matplotlib font cache (saves 23s at runtime) ────
 RUN pip install --no-cache-dir matplotlib && python -c "import matplotlib; print('Font cache generated')"
