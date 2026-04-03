@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git clone --depth 1 https://github.com/Plachtaa/seed-vc.git /app/seed-vc
 
 # ── Install Python dependencies (torch already in base image) ────
-# Removed: boto3, resemblyzer, jiwer, descript-audio-codec, hydra-core, pydub
+# Removed: boto3, resemblyzer, jiwer, pydub
 RUN pip install --no-cache-dir \
     runpod \
     requests \
@@ -22,6 +22,8 @@ RUN pip install --no-cache-dir \
     "huggingface-hub>=0.28.1" \
     munch \
     einops \
+    descript-audio-codec \
+    hydra-core \
     transformers \
     soundfile \
     pyyaml \
