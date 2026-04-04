@@ -428,6 +428,7 @@ def handler(job):
     reverb = float(job_input.get("reverb", 0.25))              # 混响（默认轻微KTV感）
     model_version = job_input.get("model_version", "fine_tuned_v2")  # 模型版本（默认最佳）
     auto_f0_adjust = bool(job_input.get("auto_f0_adjust", False))    # 自动音高适配（歌声转换建议关闭）
+    output_format = job_input.get("output_format", "mp3_320")       # wav / mp3_320 / mp3_192
 
     print(f"\n{'='*60}")
     print(f"[Job] task_id={task_id}, pitch={pitch_shift}, steps={diffusion_steps}")
@@ -500,17 +501,30 @@ def handler(job):
                       reverb=reverb)
             mix_time = time.time() - t
 
-            # ── Stage 5: Upload ──────────────────────────────────
+            # ── Stage 5: Format conversion ───────────────────────
+            output_info = torchaudio.info(final_output)
+            output_duration = output_info.num_frames / output_info.sample_rate
+
+            # Convert to target format if not WAV
+            if output_format in ("mp3_320", "mp3_192"):
+                bitrate = "320k" if output_format == "mp3_320" else "192k"
+                mp3_output = final_output.replace(".wav", ".mp3")
+                convert_cmd = ["ffmpeg", "-y", "-i", final_output, "-b:a", bitrate, mp3_output]
+                subprocess.run(convert_cmd, capture_output=True, timeout=60)
+                if os.path.exists(mp3_output):
+                    final_output = mp3_output
+                    print(f"[Format] Converted to MP3 {bitrate}")
+
+            output_size_mb = os.path.getsize(final_output) / (1024 * 1024)
+            file_ext = os.path.splitext(final_output)[1]  # .wav or .mp3
+
+            # ── Stage 6: Upload ──────────────────────────────────
             runpod.serverless.progress_update(job, {
                 "task_id": task_id, "stage": "uploading", "progress": 0.95
             })
 
-            output_info = torchaudio.info(final_output)
-            output_duration = output_info.num_frames / output_info.sample_rate
-            output_size_mb = os.path.getsize(final_output) / (1024 * 1024)
-
             t = time.time()
-            output_url = upload_file(final_output, f"cover_{task_id}.wav")
+            output_url = upload_file(final_output, f"cover_{task_id}{file_ext}")
             upload_time = time.time() - t
 
             total_time = time.time() - total_start
@@ -535,7 +549,7 @@ def handler(job):
                 "mix_time": round(mix_time, 2),
                 "upload_time": round(upload_time, 2),
                 "total_time": round(total_time, 2),
-                "output_format": "wav",
+                "output_format": output_format,
                 "sample_rate": output_info.sample_rate,
                 "size_mb": round(output_size_mb, 2),
             }
