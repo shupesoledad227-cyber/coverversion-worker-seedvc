@@ -417,6 +417,11 @@ def handler(job):
     """RunPod Serverless handler — full cover song pipeline."""
     job_input = job["input"]
 
+    # Warmup mode: Worker 已启动，直接返回
+    if job_input.get("mode") == "warmup":
+        print("[Warmup] Worker is warm and ready.")
+        return {"status": "warm", "message": "Worker is ready"}
+
     task_id = job_input.get("task_id", "unknown")
     song_url = job_input["song_url"]
     voice_url = job_input["voice_url"]
