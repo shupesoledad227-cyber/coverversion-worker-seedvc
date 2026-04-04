@@ -233,7 +233,8 @@ MODEL_VERSIONS = {
 
 def run_seed_vc_direct(source_path: str, target_path: str, output_path: str,
                        pitch_shift: int = 0, diffusion_steps: int = 25,
-                       cfg_rate: float = 0.7, model_version: str = "standard"):
+                       cfg_rate: float = 0.7, model_version: str = "fine_tuned_v2",
+                       auto_f0_adjust: bool = False):
     """
     Run Seed-VC inference via subprocess.
     model_version: "standard" / "fine_tuned" / "fine_tuned_v2"
@@ -255,7 +256,7 @@ def run_seed_vc_direct(source_path: str, target_path: str, output_path: str,
         "--length-adjust", "1.0",
         "--inference-cfg-rate", str(cfg_rate),
         "--f0-condition", "True",
-        "--auto-f0-adjust", "True",
+        "--auto-f0-adjust", str(auto_f0_adjust),
         "--semi-tone-shift", str(pitch_shift),
         "--fp16", "True",
     ]
@@ -425,12 +426,13 @@ def handler(job):
     vocal_volume = float(job_input.get("vocal_volume", 1.1))    # 人声音量（默认略突出）
     instrumental_volume = float(job_input.get("instrumental_volume", 0.9))  # 伴奏音量
     reverb = float(job_input.get("reverb", 0.25))              # 混响（默认轻微KTV感）
-    model_version = job_input.get("model_version", "standard")   # 模型版本
+    model_version = job_input.get("model_version", "fine_tuned_v2")  # 模型版本（默认最佳）
+    auto_f0_adjust = bool(job_input.get("auto_f0_adjust", False))    # 自动音高适配（歌声转换建议关闭）
 
     print(f"\n{'='*60}")
     print(f"[Job] task_id={task_id}, pitch={pitch_shift}, steps={diffusion_steps}")
     print(f"[Job] cfg_rate={cfg_rate}, vocal_vol={vocal_volume}, inst_vol={instrumental_volume}, reverb={reverb}")
-    print(f"[Job] model={model_version}")
+    print(f"[Job] model={model_version}, auto_f0={auto_f0_adjust}")
     print(f"{'='*60}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -479,7 +481,8 @@ def handler(job):
                 pitch_shift=pitch_shift,
                 diffusion_steps=diffusion_steps,
                 cfg_rate=cfg_rate,
-                model_version=model_version
+                model_version=model_version,
+                auto_f0_adjust=auto_f0_adjust
             )
             conversion_time = time.time() - t
             print(f"[Job] Conversion: {conversion_time:.1f}s")
