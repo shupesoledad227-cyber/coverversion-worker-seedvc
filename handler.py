@@ -532,8 +532,10 @@ def handler(job):
             print(f"[Job] Separation: {separation_time:.1f}s")
 
             # ── Stage 2.5: Analyze original vocal F0 ─────────────
-            print("[Job] Analyzing original vocal F0...")
+            t = time.time()
             song_vocal_f0 = analyze_vocal_f0(vocals_path)
+            f0_analysis_time = time.time() - t
+            print(f"[Job] F0 Analysis: {f0_analysis_time:.1f}s")
 
             # ── Stage 3: Voice conversion ────────────────────────
             runpod.serverless.progress_update(job, {
@@ -567,6 +569,7 @@ def handler(job):
             mix_time = time.time() - t
 
             # ── Stage 5: Format conversion ───────────────────────
+            t = time.time()
             output_info = torchaudio.info(final_output)
             output_duration = output_info.num_frames / output_info.sample_rate
 
@@ -617,6 +620,8 @@ def handler(job):
 
             output_size_mb = os.path.getsize(final_output) / (1024 * 1024)
             file_ext = os.path.splitext(final_output)[1]  # .wav or .mp3
+            format_time = time.time() - t
+            print(f"[Job] Format:     {format_time:.1f}s")
 
             # ── Stage 6: Upload ──────────────────────────────────
             runpod.serverless.progress_update(job, {
@@ -632,8 +637,10 @@ def handler(job):
             print(f"\n[Job] === SUMMARY ===")
             print(f"[Job] Download:   {download_time:.1f}s")
             print(f"[Job] Separation: {separation_time:.1f}s")
+            print(f"[Job] F0 Analyze: {f0_analysis_time:.1f}s")
             print(f"[Job] Conversion: {conversion_time:.1f}s")
             print(f"[Job] Mix:        {mix_time:.1f}s")
+            print(f"[Job] Format:     {format_time:.1f}s")
             print(f"[Job] Upload:     {upload_time:.1f}s")
             print(f"[Job] TOTAL:      {total_time:.1f}s")
             print(f"[Job] Output:     {output_duration:.1f}s, {output_size_mb:.1f} MB")
@@ -645,8 +652,10 @@ def handler(job):
                 "duration": round(output_duration, 2),
                 "download_time": round(download_time, 2),
                 "separation_time": round(separation_time, 2),
+                "f0_analysis_time": round(f0_analysis_time, 2),
                 "conversion_time": round(conversion_time, 2),
                 "mix_time": round(mix_time, 2),
+                "format_time": round(format_time, 2),
                 "upload_time": round(upload_time, 2),
                 "total_time": round(total_time, 2),
                 "output_format": output_format,
