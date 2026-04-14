@@ -55,7 +55,7 @@ print('htdemucs model downloaded')"
 
 # ── Clone Music-Source-Separation-Training (for BS Roformer inference) ──
 RUN git clone --depth 1 https://github.com/ZFTurbo/Music-Source-Separation-Training.git /app/msst
-RUN pip install --no-cache-dir ml_collections beartype rotary-embedding-torch
+RUN pip install --no-cache-dir ml_collections beartype rotary-embedding-torch wandb
 
 # ── Download BS Roformer vocal model (viperx edition, SDR 10.87, ~400MB) ──
 RUN wget -q -O /app/msst/bs_roformer_vocals.ckpt \
