@@ -223,6 +223,61 @@ def separate_vocals(song_path: str, output_dir: str):
     return vocals_path, instrumental_path
 
 
+def prepend_warmup_segment(vocals_path: str, warmup_seconds: float, output_path: str) -> int:
+    """
+    Find the loudest N-second segment in vocals, prepend it to the original vocals.
+    Returns the number of warmup samples prepended (for trimming after inference).
+    """
+    import numpy as np
+    from pedalboard.io import AudioFile
+
+    with AudioFile(vocals_path) as f:
+        sr = f.samplerate
+        audio = f.read(f.frames)  # shape: (channels, samples)
+
+    total_samples = audio.shape[1]
+    warmup_samples = int(sr * warmup_seconds)
+
+    if total_samples <= warmup_samples:
+        # 音频太短，不做热身
+        print(f"[Warmup] Audio too short ({total_samples/sr:.1f}s), skipping warmup")
+        import shutil
+        shutil.copy(vocals_path, output_path)
+        return 0
+
+    # 按每 1 秒算 RMS 能量（用第一个声道）
+    mono = audio[0] if audio.shape[0] > 1 else audio[0]
+    frame_len = sr
+    rms_per_sec = []
+    for i in range(0, len(mono) - frame_len, frame_len):
+        rms = float(np.sqrt(np.mean(mono[i:i+frame_len] ** 2)))
+        rms_per_sec.append(rms)
+
+    # 滑窗找能量最高的 warmup_seconds 秒
+    window = int(warmup_seconds)
+    best_start = 0
+    best_energy = 0
+    for i in range(len(rms_per_sec) - window + 1):
+        energy = sum(rms_per_sec[i:i+window])
+        if energy > best_energy:
+            best_energy = energy
+            best_start = i
+
+    # 截取热身段
+    start_sample = best_start * sr
+    end_sample = start_sample + warmup_samples
+    warmup_audio = audio[:, start_sample:end_sample]
+
+    # 拼接：热身段 + 原始完整人声
+    combined = np.concatenate([warmup_audio, audio], axis=1)
+
+    with AudioFile(output_path, 'w', sr, combined.shape[0]) as f:
+        f.write(combined)
+
+    print(f"[Warmup] Prepended {warmup_seconds}s warmup from {best_start}s-{best_start+int(warmup_seconds)}s (total: {combined.shape[1]/sr:.1f}s)")
+    return warmup_samples
+
+
 # 可选模型版本
 MODEL_VERSIONS = {
     "standard": "DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned_ema.pth",
@@ -515,6 +570,7 @@ def handler(job):
     cover_image = job_input.get("cover_image", "")                  # 封面图名称（如 img_cover_default_01）
     artist_name = job_input.get("artist_name", "")                  # 歌手名（嵌入 MP3 metadata）
     song_title = job_input.get("song_title", "")                    # 歌曲名（嵌入 MP3 metadata）
+    warmup_seconds = float(job_input.get("warmup_seconds", 5))       # 热身秒数（取能量最高 N 秒拼在前面，0=不热身）
 
     print(f"\n{'='*60}")
     print(f"[Job] task_id={task_id}, pitch={pitch_shift}, steps={diffusion_steps}")
@@ -579,6 +635,14 @@ def handler(job):
             else:
                 print(f"[Job] Manual pitch_shift: {pitch_shift} (user_f0={'%.1f' % user_f0 if user_f0 > 0 else 'not provided'})")
 
+            # ── Stage 2.7: Prepend warmup segment ────────────────
+            warmup_samples = 0
+            if warmup_seconds > 0:
+                warmed_vocals = os.path.join(tmpdir, "vocals_warmed.wav")
+                warmup_samples = prepend_warmup_segment(vocals_path, warmup_seconds, warmed_vocals)
+                if warmup_samples > 0:
+                    vocals_path = warmed_vocals  # 用拼接后的人声送推理
+
             # ── Stage 3: Voice conversion ────────────────────────
             runpod.serverless.progress_update(job, {
                 "task_id": task_id, "stage": "converting", "progress": 0.3
@@ -596,6 +660,21 @@ def handler(job):
             )
             conversion_time = time.time() - t
             print(f"[Job] Conversion: {conversion_time:.1f}s")
+
+            # ── Stage 3.5: Trim warmup segment from result ──────
+            if warmup_samples > 0:
+                import numpy as np
+                from pedalboard.io import AudioFile
+                with AudioFile(converted_vocals) as f:
+                    sr = f.samplerate
+                    full_audio = f.read(f.frames)
+                # 裁掉前面的热身段
+                trimmed = full_audio[:, warmup_samples:]
+                trimmed_path = os.path.join(vc_output_dir, "converted_trimmed.wav")
+                with AudioFile(trimmed_path, 'w', sr, trimmed.shape[0]) as f:
+                    f.write(trimmed)
+                converted_vocals = trimmed_path
+                print(f"[Job] Warmup trimmed: removed {warmup_seconds}s ({warmup_samples} samples)")
 
             # ── Stage 4: Mix ─────────────────────────────────────
             runpod.serverless.progress_update(job, {
@@ -706,6 +785,7 @@ def handler(job):
                 "song_vocal_f0": song_vocal_f0,
                 "applied_pitch_shift": pitch_shift,
                 "original_pitch_shift": original_pitch_shift,
+                "warmup_seconds": warmup_seconds if warmup_samples > 0 else 0,
             }
 
         except Exception as e:
