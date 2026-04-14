@@ -83,11 +83,12 @@ RUN wget -q -O /app/msst/bs_roformer_vocals.ckpt \
     && ls -lh /app/msst/bs_roformer_vocals.*
 
 # ── Download BS Roformer Karaoke model (~204MB, lead/backing separation) ──
-RUN python -c "\
-from huggingface_hub import hf_hub_download; \
-hf_hub_download('becruily/bs-roformer-karaoke', 'bs_roformer_karaoke_frazer_becruily.ckpt', local_dir='/app/msst'); \
-hf_hub_download('becruily/bs-roformer-karaoke', 'config_karaoke_frazer_becruily.yaml', local_dir='/app/msst'); \
-print('Karaoke model downloaded')"
+RUN wget -q -O /app/msst/bs_roformer_karaoke_frazer_becruily.ckpt \
+    "https://huggingface.co/becruily/bs-roformer-karaoke/resolve/main/bs_roformer_karaoke_frazer_becruily.ckpt" \
+    && wget -q -O /app/msst/config_karaoke_frazer_becruily.yaml \
+    "https://huggingface.co/becruily/bs-roformer-karaoke/resolve/main/config_karaoke_frazer_becruily.yaml" \
+    && echo "Karaoke model downloaded" \
+    && ls -lh /app/msst/bs_roformer_karaoke_frazer_becruily.*
 
 # ── Copy handler ─────────────────────────────────────────────────
 COPY handler.py /app/handler.py
