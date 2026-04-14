@@ -197,17 +197,18 @@ def upload_file(file_path: str, filename: str, max_retries: int = 3) -> str:
                 raise RuntimeError(f"Upload failed after {max_retries} attempts: {e}")
 
 
-def separate_vocals(song_path: str, output_dir: str):
+def separate_vocals(song_path: str, output_dir: str, shifts: int = 0):
     """Separate vocals and instrumental using demucs."""
-    print(f"[Demucs] Separating vocals...")
+    print(f"[Demucs] Separating vocals (shifts={shifts})...")
     cmd = [
         "python", "-m", "demucs",
         "-n", "htdemucs",
         "--two-stems", "vocals",
-        "-o", output_dir,
-        song_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if shifts > 0:
+        cmd += ["--shifts", str(shifts)]
+    cmd += ["-o", output_dir, song_path]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if result.returncode != 0:
         raise RuntimeError(f"Demucs failed: {result.stderr[-300:]}")
 
@@ -571,6 +572,7 @@ def handler(job):
     artist_name = job_input.get("artist_name", "")                  # 歌手名（嵌入 MP3 metadata）
     song_title = job_input.get("song_title", "")                    # 歌曲名（嵌入 MP3 metadata）
     warmup_seconds = float(job_input.get("warmup_seconds", 5))       # 热身秒数（取能量最高 N 秒拼在前面，0=不热身）
+    demucs_shifts = int(job_input.get("demucs_shifts", 0))           # Demucs TTA shifts（0=最快，2=更干净，3=最干净）
 
     print(f"\n{'='*60}")
     print(f"[Job] task_id={task_id}, pitch={pitch_shift}, steps={diffusion_steps}")
@@ -608,7 +610,7 @@ def handler(job):
             })
 
             t = time.time()
-            vocals_path, instrumental_path = separate_vocals(song_path, demucs_output_dir)
+            vocals_path, instrumental_path = separate_vocals(song_path, demucs_output_dir, shifts=demucs_shifts)
             separation_time = time.time() - t
             print(f"[Job] Separation: {separation_time:.1f}s")
 
