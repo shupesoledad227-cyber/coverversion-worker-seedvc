@@ -34,7 +34,7 @@ RUN pip install --no-cache-dir \
 # ── Pre-generate matplotlib font cache (saves 23s at runtime) ────
 RUN pip install --no-cache-dir matplotlib && python -c "import matplotlib; print('Font cache generated')"
 
-# ── Pre-download model weights (free during build, not at runtime) ──
+# ── Pre-download Seed-VC weights (handler 只用 fine_tuned_v2，但启动需要其他文件) ──
 RUN python -c "\
 from huggingface_hub import snapshot_download; \
 snapshot_download('Plachta/Seed-VC', local_dir='/app/seed-vc/checkpoints/Seed-VC'); \
@@ -73,14 +73,6 @@ RUN pip install --no-cache-dir \
     hyper_connections==0.1.11 \
     torch_log_wmse \
     torch_l1_snr
-
-# ── Download BS Roformer vocal model (viperx edition, SDR 10.87, ~400MB) ──
-RUN wget -q -O /app/msst/bs_roformer_vocals.ckpt \
-    "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/model_bs_roformer_ep_317_sdr_12.9755.ckpt" \
-    && wget -q -O /app/msst/bs_roformer_vocals.yaml \
-    "https://raw.githubusercontent.com/ZFTurbo/Music-Source-Separation-Training/main/configs/viperx/model_bs_roformer_ep_317_sdr_12.9755.yaml" \
-    && echo "BS Roformer vocals downloaded (SDR 10.87)" \
-    && ls -lh /app/msst/bs_roformer_vocals.*
 
 # ── Download BS Roformer Karaoke model (~204MB, lead/backing separation) ──
 RUN wget -q -O /app/msst/bs_roformer_karaoke_frazer_becruily.ckpt \

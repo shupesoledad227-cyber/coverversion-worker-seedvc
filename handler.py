@@ -224,69 +224,6 @@ def separate_vocals(song_path: str, output_dir: str, shifts: int = 0):
     return vocals_path, instrumental_path
 
 
-def separate_vocals_bs_roformer(song_path: str, output_dir: str):
-    """Separate vocals and instrumental using BS Roformer (SDR 10.87, much better than Demucs 7.5)."""
-    print(f"[BS-Roformer] Separating vocals...")
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Copy song to a dedicated input folder (MSST processes ALL files in input_folder)
-    bsr_input = os.path.join(output_dir, "_input")
-    os.makedirs(bsr_input, exist_ok=True)
-    shutil.copy(song_path, os.path.join(bsr_input, os.path.basename(song_path)))
-
-    bsr_output = os.path.join(output_dir, "_output")
-    os.makedirs(bsr_output, exist_ok=True)
-
-    cmd = [
-        "python", "/app/msst/inference.py",
-        "--model_type", "bs_roformer",
-        "--config_path", "/app/msst/bs_roformer_vocals.yaml",
-        "--start_check_point", "/app/msst/bs_roformer_vocals.ckpt",
-        "--input_folder", bsr_input,
-        "--store_dir", bsr_output,
-        "--extract_instrumental",
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd="/app/msst")
-    if result.stdout:
-        print(f"[BS-Roformer] STDOUT: {result.stdout[-500:]}")
-    if result.stderr:
-        stderr_lines = [l for l in result.stderr.split('\n') if 'FutureWarning' not in l and 'UserWarning' not in l]
-        stderr_clean = '\n'.join(stderr_lines).strip()
-        if stderr_clean:
-            print(f"[BS-Roformer] STDERR: {stderr_clean[-300:]}")
-    if result.returncode != 0:
-        raise RuntimeError(f"BS-Roformer failed: {result.stderr[-300:]}")
-
-    # Find output files (MSST may put them in subdirectories)
-    vocals_path = None
-    instrumental_path = None
-    for root, dirs, files in os.walk(bsr_output):
-        for f in files:
-            if not f.endswith('.wav'):
-                continue
-            lower = f.lower()
-            full = os.path.join(root, f)
-            if 'vocal' in lower and 'instrumental' not in lower and 'other' not in lower:
-                vocals_path = full
-            elif 'instrumental' in lower or 'other' in lower:
-                instrumental_path = full
-
-    # Debug: list everything
-    all_files = []
-    for root, dirs, files in os.walk(bsr_output):
-        for f in files:
-            all_files.append(os.path.relpath(os.path.join(root, f), bsr_output))
-    print(f"[BS-Roformer] Output files: {all_files}")
-
-    if not vocals_path:
-        raise RuntimeError(f"BS-Roformer vocals not found in: {all_files}")
-    if not instrumental_path:
-        raise RuntimeError(f"BS-Roformer instrumental not found in: {all_files}")
-
-    print(f"[BS-Roformer] Done: vocals={os.path.relpath(vocals_path, bsr_output)}, inst={os.path.relpath(instrumental_path, bsr_output)}")
-    return vocals_path, instrumental_path
-
-
 def separate_karaoke(vocals_path: str, output_dir: str):
     """Separate lead vocals from backing vocals using BS Roformer Karaoke model."""
     print(f"[Karaoke] Separating lead/backing vocals...")
@@ -395,8 +332,6 @@ def prepend_warmup_segment(vocals_path: str, warmup_seconds: float, output_path:
 
 # 可选模型版本
 MODEL_VERSIONS = {
-    "standard": "DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned_ema.pth",
-    "fine_tuned": "DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned_ft_ema.pth",
     "fine_tuned_v2": "DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned_ft_ema_v2.pth",
 }
 
@@ -679,7 +614,6 @@ def handler(job):
     vocal_volume = float(job_input.get("vocal_volume", 1.1))    # 人声音量（默认略突出）
     instrumental_volume = float(job_input.get("instrumental_volume", 0.9))  # 伴奏音量
     reverb = float(job_input.get("reverb", 0.25))              # 混响（默认轻微KTV感）
-    model_version = job_input.get("model_version", "fine_tuned_v2")  # 模型版本（默认最佳）
     auto_f0_adjust = bool(job_input.get("auto_f0_adjust", False))    # 自动音高适配（歌声转换建议关闭）
     output_format = job_input.get("output_format", "mp3_320")       # wav / mp3_320 / mp3_192
     cover_image = job_input.get("cover_image", "")                  # 封面图名称（如 img_cover_default_01）
@@ -687,13 +621,15 @@ def handler(job):
     song_title = job_input.get("song_title", "")                    # 歌曲名（嵌入 MP3 metadata）
     warmup_seconds = float(job_input.get("warmup_seconds", 5))       # 热身秒数（取能量最高 N 秒拼在前面，0=不热身）
     demucs_shifts = int(job_input.get("demucs_shifts", 0))           # Demucs TTA shifts（0=最快，2=更干净，3=最干净）
-    separation_engine = job_input.get("separation_engine", "demucs") # "demucs" 或 "bs_roformer"
     karaoke_enabled = bool(job_input.get("karaoke_enabled", False))  # 是否分离主唱和和声
+
+    # 固定使用 fine_tuned_v2（最佳）
+    model_version = "fine_tuned_v2"
 
     print(f"\n{'='*60}")
     print(f"[Job] task_id={task_id}, pitch={pitch_shift}, steps={diffusion_steps}")
     print(f"[Job] cfg_rate={cfg_rate}, vocal_vol={vocal_volume}, inst_vol={instrumental_volume}, reverb={reverb}")
-    print(f"[Job] model={model_version}, auto_f0={auto_f0_adjust}")
+    print(f"[Job] auto_f0={auto_f0_adjust}, karaoke={karaoke_enabled}")
     print(f"{'='*60}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -726,12 +662,9 @@ def handler(job):
             })
 
             t = time.time()
-            if separation_engine == "bs_roformer":
-                vocals_path, instrumental_path = separate_vocals_bs_roformer(
-                    song_path, os.path.join(tmpdir, "bsroformer_out"))
-            else:
-                vocals_path, instrumental_path = separate_vocals(
-                    song_path, demucs_output_dir, shifts=demucs_shifts)
+            vocals_path, instrumental_path = separate_vocals(
+                song_path, demucs_output_dir, shifts=demucs_shifts)
+            separation_engine = "demucs"  # 固定 demucs
             separation_time = time.time() - t
             print(f"[Job] Separation ({separation_engine}): {separation_time:.1f}s")
 
