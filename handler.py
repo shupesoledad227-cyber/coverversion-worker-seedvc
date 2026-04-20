@@ -11,7 +11,6 @@ Optimization: Seed-VC model loaded ONCE at startup, stays in GPU memory.
 """
 
 import os
-import sys
 import tempfile
 import time
 import subprocess
@@ -20,141 +19,10 @@ import shutil
 
 import requests
 import runpod
-import torch
 import torchaudio
-import numpy as np
-import yaml
-import librosa
-import soundfile as sf
 
-# ── Add Seed-VC to path ──────────────────────────────────────────
+# Seed-VC inference 由子进程执行（cwd=SEED_VC_DIR），父进程不需要导入其模块
 SEED_VC_DIR = "/app/seed-vc"
-sys.path.insert(0, SEED_VC_DIR)
-
-# ── Seed-VC imports ──────────────────────────────────────────────
-from modules.commons import build_model, load_checkpoint, recursive_munch
-from modules.campplus.DTDNN import CAMPPlus
-from modules.bigvgan import bigvgan
-from modules.rmvpe import RMVPE
-from transformers import WhisperModel, WhisperFeatureExtractor
-
-# ── Global model state (loaded once, reused across requests) ─────
-DEVICE = None
-DTYPE = None
-SR = 44100  # Singing model sample rate
-
-# Model components
-dit_model = None
-dit_config = None
-campplus_model = None
-vocoder = None
-rmvpe_model = None
-whisper_model = None
-whisper_feature_extractor = None
-
-# Config values
-dit_model_config = None
-mel_fn_args = None
-to_mel = None
-overlap_wave_len = None
-max_context_window = None
-overlap_frame_len = None
-bitrate = None
-
-
-def load_all_models():
-    """Load all models into GPU memory once at startup."""
-    global DEVICE, DTYPE
-    global dit_model, dit_config, dit_model_config
-    global campplus_model, vocoder, rmvpe_model
-    global whisper_model, whisper_feature_extractor
-    global mel_fn_args, to_mel, overlap_wave_len, max_context_window, overlap_frame_len, bitrate
-
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    DTYPE = torch.float16
-
-    print(f"[Init] Device: {DEVICE}, Dtype: {DTYPE}")
-
-    # ── Load Seed-VC config ──────────────────────────────────────
-    config_path = os.path.join(SEED_VC_DIR, "configs", "presets", "config_dit_mel_seed_uvit_whisper_base_f0_44k.yml")
-    with open(config_path, "r") as f:
-        dit_config = yaml.safe_load(f)
-
-    dit_model_config = recursive_munch(dit_config["model_params"])
-    mel_fn_args = dit_config["preprocess_params"]["spect_params"]
-    overlap_wave_len = dit_config["preprocess_params"].get("overlap_wave_len", 16 * SR)
-    max_context_window = dit_config["preprocess_params"].get("max_context_window", 30 * SR)
-    overlap_frame_len = 16
-    bitrate = dit_config.get("vocoder_params", {}).get("bitrate", "320k")
-
-    # ── Load DiT model ───────────────────────────────────────────
-    print("[Init] Loading DiT model...")
-    dit_model = build_model(dit_model_config, stage="DiT")
-
-    # Find checkpoint
-    ckpt_dir = os.path.join(SEED_VC_DIR, "checkpoints", "Seed-VC")
-    ckpt_candidates = [
-        os.path.join(ckpt_dir, "DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned_ema.pth"),
-        os.path.join(ckpt_dir, "DiT_seed_v2_uvit_whisper_base_f0_44k_bigvgan_pruned.pth"),
-    ]
-    ckpt_path = None
-    for c in ckpt_candidates:
-        if os.path.exists(c):
-            ckpt_path = c
-            break
-
-    if ckpt_path is None:
-        # List what's available
-        if os.path.exists(ckpt_dir):
-            files = os.listdir(ckpt_dir)
-            pth_files = [f for f in files if f.endswith('.pth')]
-            if pth_files:
-                ckpt_path = os.path.join(ckpt_dir, pth_files[0])
-                print(f"[Init] Using checkpoint: {ckpt_path}")
-            else:
-                print(f"[Init] No .pth found in {ckpt_dir}, files: {files}")
-        else:
-            print(f"[Init] Checkpoint dir not found: {ckpt_dir}")
-
-    if ckpt_path:
-        load_checkpoint(dit_model, None, ckpt_path,
-                        load_only_params=True, ignore_modules=[], is_distributed=False)
-        print(f"[Init] DiT loaded from {ckpt_path}")
-
-    dit_model = dit_model.to(DEVICE).to(DTYPE)
-    dit_model.eval()
-
-    # ── Load CAMPPlus speaker encoder ────────────────────────────
-    print("[Init] Loading CAMPPlus...")
-    campplus_model = CAMPPlus(feat_dim=80, embedding_size=192)
-    campplus_ckpt = os.path.join(ckpt_dir, "campplus.pth")
-    if os.path.exists(campplus_ckpt):
-        campplus_model.load_state_dict(torch.load(campplus_ckpt, map_location="cpu"))
-    else:
-        print(f"[Init] campplus.pth not found at {campplus_ckpt}")
-    campplus_model = campplus_model.to(DEVICE).eval()
-
-    # ── Load RMVPE (pitch extractor) ─────────────────────────────
-    print("[Init] Loading RMVPE...")
-    rmvpe_ckpt = os.path.join(ckpt_dir, "rmvpe.pt")
-    if os.path.exists(rmvpe_ckpt):
-        rmvpe_model = RMVPE(rmvpe_ckpt, is_half=True, device=DEVICE)
-    else:
-        print(f"[Init] rmvpe.pt not found at {rmvpe_ckpt}")
-
-    # ── Load BigVGAN vocoder ─────────────────────────────────────
-    print("[Init] Loading BigVGAN vocoder...")
-    vocoder = bigvgan.BigVGAN.from_pretrained("nvidia/bigvgan_v2_44khz_128band_512x", use_cuda_kernel=False)
-    vocoder = vocoder.to(DEVICE).eval()
-    vocoder.remove_weight_norm()
-
-    # ── Load Whisper (content encoder) ───────────────────────────
-    print("[Init] Loading Whisper...")
-    whisper_name = dit_model_config.speech_tokenizer_params.get("name", "openai/whisper-small")
-    whisper_model = WhisperModel.from_pretrained(whisper_name).to(DEVICE).to(DTYPE).eval()
-    whisper_feature_extractor = WhisperFeatureExtractor.from_pretrained(whisper_name)
-
-    print("[Init] All models loaded successfully!")
 
 
 def download_file(url: str, dest_path: str):
@@ -254,7 +122,7 @@ def separate_karaoke(vocals_path: str, output_dir: str):
     lead_path = None
     backing_path = None
     all_files = []
-    for root, dirs, files in os.walk(output_dir):
+    for root, _, files in os.walk(output_dir):
         for f in files:
             if not f.endswith('.wav'):
                 continue
@@ -418,7 +286,7 @@ def mix_audio(vocals_path: str, instrumental_path: str, output_path: str,
     reverb: 混响强度 (0.0=干声, 0.3=KTV包厢, 0.6=大厅, 0.8=教堂)
     """
     import numpy as np
-    from pedalboard import Pedalboard, Reverb, Compressor, HighpassFilter, LowpassFilter, Gain
+    from pedalboard import Pedalboard, Reverb, Compressor, HighpassFilter, Gain
     from pedalboard.io import AudioFile
 
     print(f"[Mix] Processing: vocal_vol={vocal_volume}, inst_vol={instrumental_volume}, reverb={reverb}")
@@ -808,14 +676,6 @@ def handler(job):
             }
 
 
-# ── Startup: Load models once ────────────────────────────────────
 if __name__ == "__main__":
     print("[Init] Seed-VC Cover Song Worker v2")
-    print("[Init] Loading all models into GPU memory...")
-    try:
-        load_all_models()
-    except Exception as e:
-        print(f"[Init] WARNING: Model preload failed: {e}")
-        print("[Init] Models will be loaded on first inference via subprocess")
-
     runpod.serverless.start({"handler": handler})
