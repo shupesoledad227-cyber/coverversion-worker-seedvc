@@ -514,6 +514,8 @@ def handler(job):
                       f"raw={raw_shift:.2f}, applied={pitch_shift} (original={original_pitch_shift})")
             else:
                 print(f"[Job] Manual pitch_shift: {pitch_shift} (user_f0={'%.1f' % user_f0 if user_f0 > 0 else 'not provided'})")
+            print(f"[Job] song_vocal_f0={song_vocal_f0}")
+            print(f"[Job] original_pitch_shift={original_pitch_shift}, applied_pitch_shift={pitch_shift}")
 
             # ── Stage 3: Voice conversion ────────────────────────
             runpod.serverless.progress_update(job, {
