@@ -39,6 +39,28 @@ def download_file(url: str, dest_path: str):
     print(f"[Download] Done: {size_mb:.1f} MB")
 
 
+# 默认封面统一存放于 CDN 加速域名下的固定目录
+DEFAULT_COVER_CDN_BASE = "https://lightsing-oss.cstarsage.com/cover-song-uploads/default"
+
+
+def resolve_cover_url(cover_image: str) -> str:
+    """把客户端传入的封面标识解析成可下载的 URL。
+
+    - 内置默认封面（img_cover_default_*）直接映射到 CDN 加速域名，
+      规避“服务端加 OSS 前缀 + worker 再套 github 前缀”拼出的坏 URL。
+    - 已是完整 http(s) URL 的，原样返回。
+    - 其余裸文件名兜底走旧的 GitHub raw 仓库。
+    """
+    stem = os.path.basename(cover_image.split("?", 1)[0])
+    if stem.endswith(".png"):
+        stem = stem[:-4]
+    if stem.startswith("img_cover_default_"):
+        return f"{DEFAULT_COVER_CDN_BASE}/{stem}.png"
+    if cover_image.startswith(("http://", "https://")):
+        return cover_image
+    return f"https://raw.githubusercontent.com/WhistleB/coverversion-worker/main/assets/covers/{cover_image}.png"
+
+
 def get_required_env(name: str) -> str:
     """Read a required environment variable."""
     value = os.environ.get(name, "").strip()
@@ -673,7 +695,7 @@ def handler(job):
                 # 下载封面图（如果指定了）
                 cover_path = None
                 if cover_image:
-                    cover_url = f"https://raw.githubusercontent.com/WhistleB/coverversion-worker/main/assets/covers/{cover_image}.png"
+                    cover_url = resolve_cover_url(cover_image)
                     cover_path = os.path.join(tmpdir, "cover.png")
                     try:
                         download_file(cover_url, cover_path)
