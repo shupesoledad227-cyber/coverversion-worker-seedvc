@@ -532,6 +532,20 @@ def handler(job):
     karaoke_enabled = bool(job_input.get("karaoke_enabled", False))  # 是否分离主唱和和声
     client_song_f0 = float(job_input.get("song_f0", 0))  # 客户端预先算好的歌曲 F0；> 0 时跳过后端 librosa.pyin 分析
 
+    # ── 新增：测试/正式环境分支 + 客户端预分离 bypass（向后兼容，老客户端不传则走老逻辑）──
+    # env 字段：缺省/"prod" → 完全走老逻辑（即使带了 preset URL 也忽略）
+    #          "test"      → 启用新逻辑（preset URL 不全时仍兜底跑 Demucs/Karaoke）
+    # 验证 OK 后想推全量：把下面 is_test_env 判断去掉即可
+    env = (job_input.get("env") or "prod").strip().lower()
+    is_test_env = (env == "test")
+    preset_cappella_url = (job_input.get("mp3_url_cappella") or "").strip()
+    preset_accompaniment_url = (job_input.get("mp3_url_accompaniment") or "").strip()
+    use_preset_separation = (
+        is_test_env
+        and bool(preset_cappella_url)
+        and bool(preset_accompaniment_url)
+    )
+
     # 固定使用 fine_tuned_v2（最佳）
     model_version = "fine_tuned_v2"
 
@@ -539,6 +553,8 @@ def handler(job):
     print(f"[Job] task_id={task_id}, pitch={pitch_shift}, steps={diffusion_steps}")
     print(f"[Job] cfg_rate={cfg_rate}, vocal_vol={vocal_volume}, inst_vol={instrumental_volume}, reverb={reverb}")
     print(f"[Job] auto_f0={auto_f0_adjust}, karaoke={karaoke_enabled}, client_song_f0={client_song_f0 if client_song_f0 > 0 else 'none'}")
+    print(f"[Job] env={env}, use_preset_separation={use_preset_separation} "
+          f"(cappella={'yes' if preset_cappella_url else 'no'}, accompaniment={'yes' if preset_accompaniment_url else 'no'})")
     print(f"{'='*60}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -565,29 +581,46 @@ def handler(job):
             song_duration = song_info.num_frames / song_info.sample_rate
             print(f"[Job] Song: {song_duration:.1f}s, Download: {download_time:.1f}s")
 
-            # ── Stage 2: Vocal separation ────────────────────────
-            runpod.serverless.progress_update(job, {
-                "task_id": task_id, "stage": "separating", "progress": 0.1
-            })
-
-            t = time.time()
-            vocals_path, instrumental_path = separate_vocals(
-                song_path, demucs_output_dir, shifts=demucs_shifts)
-            separation_engine = "demucs"  # 固定 demucs
-            separation_time = time.time() - t
-            print(f"[Job] Separation ({separation_engine}): {separation_time:.1f}s")
-
-            # ── Stage 2.1: Karaoke separation (optional) ────────
+            # ── Stage 2 + 2.1: Vocal separation ─────────────────
+            # use_preset_separation 为真（env=test 且 cappella/accompaniment 两 URL 都有）→
+            #   直接下载客户端预分离好的纯人声+伴奏，跳过 Demucs+Karaoke。
+            #   accompaniment 由客户端在预处理时把 backing+instrumental 合并好了，所以这里
+            #   backing_vocals_path 留 None，Stage 4 mix 自动跳过 backing 二次混音。
+            # 否则走老逻辑：Demucs 分离 + 可选 Karaoke。
             backing_vocals_path = None
             karaoke_time = 0
-            if karaoke_enabled:
+            if use_preset_separation:
+                runpod.serverless.progress_update(job, {
+                    "task_id": task_id, "stage": "downloading_preset", "progress": 0.1
+                })
                 t = time.time()
-                karaoke_out_dir = os.path.join(tmpdir, "karaoke_out")
-                lead_path, backing_path = separate_karaoke(vocals_path, karaoke_out_dir)
-                vocals_path = lead_path  # 只转换主唱
-                backing_vocals_path = backing_path
-                karaoke_time = time.time() - t
-                print(f"[Job] Karaoke: {karaoke_time:.1f}s")
+                vocals_path = os.path.join(tmpdir, "preset_cappella.mp3")
+                instrumental_path = os.path.join(tmpdir, "preset_accompaniment.mp3")
+                download_file(preset_cappella_url, vocals_path)
+                download_file(preset_accompaniment_url, instrumental_path)
+                separation_engine = "preset"
+                separation_time = time.time() - t
+                print(f"[Job] Preset separation (skip Demucs+Karaoke): {separation_time:.1f}s")
+            else:
+                runpod.serverless.progress_update(job, {
+                    "task_id": task_id, "stage": "separating", "progress": 0.1
+                })
+                t = time.time()
+                vocals_path, instrumental_path = separate_vocals(
+                    song_path, demucs_output_dir, shifts=demucs_shifts)
+                separation_engine = "demucs"  # 固定 demucs
+                separation_time = time.time() - t
+                print(f"[Job] Separation ({separation_engine}): {separation_time:.1f}s")
+
+                # ── Stage 2.1: Karaoke separation (optional) ────────
+                if karaoke_enabled:
+                    t = time.time()
+                    karaoke_out_dir = os.path.join(tmpdir, "karaoke_out")
+                    lead_path, backing_path = separate_karaoke(vocals_path, karaoke_out_dir)
+                    vocals_path = lead_path  # 只转换主唱
+                    backing_vocals_path = backing_path
+                    karaoke_time = time.time() - t
+                    print(f"[Job] Karaoke: {karaoke_time:.1f}s")
 
             # ── Stage 2.5: Analyze original vocal F0 ─────────────
             # 客户端如果传了 song_f0（针对引导页固定歌曲预先算好），跳过 librosa.pyin
