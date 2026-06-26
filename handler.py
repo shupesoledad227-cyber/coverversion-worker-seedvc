@@ -573,13 +573,21 @@ def handler(job):
             os.makedirs(vc_output_dir, exist_ok=True)
 
             t = time.time()
-            download_file(song_url, song_path)
+            # voice 永远要下（用户音色参考）
             download_file(voice_url, voice_path)
+            # song_url 只在老路径下载——preset 模式下原曲对 worker 无意义
+            # （cappella+accompaniment 已是预分离产物，平台歌的客户端可能根本没原曲）
+            song_duration = None  # preset 模式下后面从 accompaniment 补算
+            if not use_preset_separation:
+                download_file(song_url, song_path)
+                song_info = torchaudio.info(song_path)
+                song_duration = song_info.num_frames / song_info.sample_rate
             download_time = time.time() - t
 
-            song_info = torchaudio.info(song_path)
-            song_duration = song_info.num_frames / song_info.sample_rate
-            print(f"[Job] Song: {song_duration:.1f}s, Download: {download_time:.1f}s")
+            if song_duration is not None:
+                print(f"[Job] Song: {song_duration:.1f}s, Download: {download_time:.1f}s")
+            else:
+                print(f"[Job] Preset mode, song_url skipped; Download: {download_time:.1f}s")
 
             # ── Stage 2 + 2.1: Vocal separation ─────────────────
             # use_preset_separation 为真（env=test 且 cappella/accompaniment 两 URL 都有）→
@@ -600,7 +608,15 @@ def handler(job):
                 download_file(preset_accompaniment_url, instrumental_path)
                 separation_engine = "preset"
                 separation_time = time.time() - t
-                print(f"[Job] Preset separation (skip Demucs+Karaoke): {separation_time:.1f}s")
+                # 补算 duration（用 accompaniment 长度，跟原曲一致）
+                if song_duration is None:
+                    try:
+                        info = torchaudio.info(instrumental_path)
+                        song_duration = info.num_frames / info.sample_rate
+                    except Exception:
+                        song_duration = 0  # 拿不到也不阻塞，仅日志缺失
+                print(f"[Job] Preset separation (skip Demucs+Karaoke): {separation_time:.1f}s, "
+                      f"song_duration={song_duration:.1f}s")
             else:
                 runpod.serverless.progress_update(job, {
                     "task_id": task_id, "stage": "separating", "progress": 0.1
