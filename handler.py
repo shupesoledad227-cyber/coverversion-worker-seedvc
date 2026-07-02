@@ -337,9 +337,88 @@ def analyze_vocal_f0(vocals_path: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def zero_out_silent_segments(vocal_audio, cappella_path: str, sr: int,
+                              threshold_db: float = -50,
+                              min_silence_sec: float = 0.5,
+                              fade_ms: float = 20):
+    """
+    基于 cappella（原歌纯人声）的静音段，把 Seed-VC 输出对应段归零。
+    根治"前奏/间奏/尾奏 cappella 静音时 Seed-VC 产生的幻听"问题。
+
+    - 逐 100ms 帧算 cappella RMS
+    - 连续 ≥ min_silence_sec 且 < threshold_db 的段 → "歌手没在唱"
+    - Seed-VC 输出对应样本区间归零
+    - 段边界各 fade_ms 加线性淡入/淡出，防归零瞬间的 click 噪声
+
+    返回: (vocal_audio 修改后, silent_regions_sec, total_muted_sec)
+    """
+    import numpy as np
+    from pedalboard.io import AudioFile
+
+    with AudioFile(cappella_path) as f:
+        cap_sr = f.samplerate
+        cap_audio = f.read(f.frames)
+
+    # 转 mono 用于 RMS 计算
+    cap_mono = cap_audio.mean(axis=0) if cap_audio.ndim > 1 else cap_audio
+
+    hop = int(cap_sr * 0.1)  # 100ms 帧
+    n_frames = len(cap_mono) // hop
+    threshold_linear = 10 ** (threshold_db / 20)
+
+    # 逐帧 RMS
+    frame_rms = np.array([
+        np.sqrt(np.mean(cap_mono[i*hop:(i+1)*hop]**2))
+        for i in range(n_frames)
+    ])
+    is_silent = frame_rms < threshold_linear
+
+    # 找连续静音段（用时间秒表示，不管 sr）
+    silent_regions_sec = []
+    start_frame = None
+    for i in range(n_frames):
+        if is_silent[i] and start_frame is None:
+            start_frame = i
+        elif not is_silent[i] and start_frame is not None:
+            duration = (i - start_frame) * 0.1
+            if duration >= min_silence_sec:
+                silent_regions_sec.append((start_frame * 0.1, i * 0.1))
+            start_frame = None
+    if start_frame is not None:
+        duration = (n_frames - start_frame) * 0.1
+        if duration >= min_silence_sec:
+            silent_regions_sec.append((start_frame * 0.1, n_frames * 0.1))
+
+    # 应用到 vocal_audio（按 vocal 自己的 sr 换算样本索引）
+    fade_samples = int(sr * fade_ms / 1000)
+    n_samples = vocal_audio.shape[-1]
+    total_muted = 0.0
+    for start_sec, end_sec in silent_regions_sec:
+        s = max(0, int(start_sec * sr))
+        e = min(n_samples, int(end_sec * sr))
+        if s >= e:
+            continue
+        # 段头 fade out：从满音量降到 0
+        if s - fade_samples > 0:
+            fade_out = np.linspace(1, 0, fade_samples).astype(vocal_audio.dtype)
+            for ch in range(vocal_audio.shape[0]):
+                vocal_audio[ch, s-fade_samples:s] *= fade_out
+        # 主体归零
+        vocal_audio[..., s:e] = 0
+        # 段尾 fade in：从 0 升回满音量
+        if e + fade_samples < n_samples:
+            fade_in = np.linspace(0, 1, fade_samples).astype(vocal_audio.dtype)
+            for ch in range(vocal_audio.shape[0]):
+                vocal_audio[ch, e:e+fade_samples] *= fade_in
+        total_muted += (end_sec - start_sec)
+
+    return vocal_audio, silent_regions_sec, total_muted
+
+
 def mix_audio(vocals_path: str, instrumental_path: str, output_path: str,
               vocal_volume: float = 1.0, instrumental_volume: float = 1.0,
-              reverb: float = 0.0):
+              reverb: float = 0.0,
+              original_cappella_path: str = None):
     """
     Mix converted vocals with original instrumental.
     Uses pedalboard for professional reverb/EQ, ffmpeg for final mix.
@@ -347,7 +426,9 @@ def mix_audio(vocals_path: str, instrumental_path: str, output_path: str,
     vocal_volume: 人声音量 (1.0=原始, 3.0=最大)
     instrumental_volume: 伴奏音量 (1.0=原始)
     reverb: 混响强度 (0.0=干声, 0.3=KTV包厢, 0.6=大厅, 0.8=教堂)
+    original_cappella_path: 原歌纯人声路径（非空 → 启用静音段消音，消除 Seed-VC 幻听）
     """
+    import time as _t
     import numpy as np
     from pedalboard import Pedalboard, Reverb, Compressor, HighpassFilter, Gain
     from pedalboard.io import AudioFile
@@ -359,6 +440,15 @@ def mix_audio(vocals_path: str, instrumental_path: str, output_path: str,
     with AudioFile(vocals_path) as f:
         vocal_sr = f.samplerate
         vocal_audio = f.read(f.frames)
+
+    # ── Step 1a: 基于 cappella 静音段消音（消除 Seed-VC 前奏/间奏/尾奏幻听）──
+    if original_cappella_path and os.path.exists(original_cappella_path):
+        _t0 = _t.time()
+        vocal_audio, silent_regions, total_muted = zero_out_silent_segments(
+            vocal_audio, original_cappella_path, vocal_sr,
+            threshold_db=-50, min_silence_sec=0.5, fade_ms=20)
+        print(f"[Silence Mute] {len(silent_regions)} regions muted "
+              f"({total_muted:.1f}s total), took {_t.time()-_t0:.2f}s")
 
     # Fade-in/out：消除起始"噗"声和结尾"咔嗒"声
     # Seed-VC diffusion 模型的第一帧经常有瞬态杂波，fade-in 可以彻底消除
@@ -725,10 +815,16 @@ def handler(job):
                     print(f"[Mix] Backing vocals merged into instrumental")
 
             final_output = os.path.join(tmpdir, "final_cover.wav")
+            # env=test 时启用"cappella 静音段消音"，消除 Seed-VC 前奏/间奏/尾奏幻听
+            # vocals_path 在 Stage 2/2.1 结束时仍指向源 cappella（preset 是 preset_cappella.mp3，
+            # 老路径是 demucs vocals 或 karaoke lead），Seed-VC 输出在 converted_vocals 独立路径
+            # 验证 OK 后想推全量：把 is_test_env 判断去掉即可
+            cappella_for_mute = vocals_path if is_test_env else None
             mix_audio(converted_vocals, instrumental_path, final_output,
                       vocal_volume=vocal_volume,
                       instrumental_volume=instrumental_volume,
-                      reverb=reverb)
+                      reverb=reverb,
+                      original_cappella_path=cappella_for_mute)
             mix_time = time.time() - t
 
             # ── Stage 5: Format conversion ───────────────────────
