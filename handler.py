@@ -418,7 +418,8 @@ def zero_out_silent_segments(vocal_audio, cappella_path: str, sr: int,
 def mix_audio(vocals_path: str, instrumental_path: str, output_path: str,
               vocal_volume: float = 1.0, instrumental_volume: float = 1.0,
               reverb: float = 0.0,
-              original_cappella_path: str = None):
+              original_cappella_path: str = None,
+              enable_limiter: bool = False):
     """
     Mix converted vocals with original instrumental.
     Uses pedalboard for professional reverb/EQ, ffmpeg for final mix.
@@ -427,6 +428,9 @@ def mix_audio(vocals_path: str, instrumental_path: str, output_path: str,
     instrumental_volume: 伴奏音量 (1.0=原始)
     reverb: 混响强度 (0.0=干声, 0.3=KTV包厢, 0.6=大厅, 0.8=教堂)
     original_cappella_path: 原歌纯人声路径（非空 → 启用静音段消音，消除 Seed-VC 幻听）
+    enable_limiter: 混音总线 -1dBFS limiter。人声+伴奏求和可能超 0dBFS，写 16bit WAV
+                    时被硬剪产生破音（实测线上 cover 峰值普遍 +0.4~+1.3dB）。limiter
+                    平滑压峰替代硬剪。
     """
     import time as _t
     import numpy as np
@@ -546,12 +550,18 @@ def mix_audio(vocals_path: str, instrumental_path: str, output_path: str,
     print(f"[Mix] Instrumental effects applied: {len(inst_effects)} effects")
 
     # ── Step 3: 混合人声+伴奏（ffmpeg）────────────────────────
+    mix_filter = "[0:a][1:a]amix=inputs=2:duration=longest:weights=1 1:normalize=0"
+    if enable_limiter:
+        # -1dBFS true-peak limiter：5ms lookahead 平滑压峰，替代 16bit 写盘时的硬剪破音
+        # limit=0.891 ≈ -1dBFS；level=false 不做自动补增益（保持整体响度不变）
+        mix_filter += ",alimiter=limit=0.891:attack=5:release=100:level=false"
+        print(f"[Mix] Limiter enabled (-1dBFS ceiling)")
     cmd = [
         "ffmpeg", "-y",
         "-i", processed_vocal_path,
         "-i", processed_inst_path,
         "-filter_complex",
-        "[0:a][1:a]amix=inputs=2:duration=longest:weights=1 1:normalize=0",
+        mix_filter,
         "-ac", "2", "-ar", "44100",
         output_path,
     ]
@@ -824,7 +834,8 @@ def handler(job):
                       vocal_volume=vocal_volume,
                       instrumental_volume=instrumental_volume,
                       reverb=reverb,
-                      original_cappella_path=cappella_for_mute)
+                      original_cappella_path=cappella_for_mute,
+                      enable_limiter=is_test_env)  # test 闸门：总线 -1dBFS limiter 防破音
             mix_time = time.time() - t
 
             # ── Stage 5: Format conversion ───────────────────────
