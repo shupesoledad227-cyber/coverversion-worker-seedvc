@@ -746,8 +746,13 @@ def handler(job):
                 t = time.time()
                 vocals_path = os.path.join(tmpdir, "preset_cappella.mp3")
                 instrumental_path = os.path.join(tmpdir, "preset_accompaniment.mp3")
-                download_file(preset_cappella_url, vocals_path)
-                download_file(preset_accompaniment_url, instrumental_path)
+                # 两文件并行下载：总耗时 = 慢者而非两者之和（各 ~10MB，串行实测 5.5s → 并行 ~3s）
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=2) as _dl:
+                    _f1 = _dl.submit(download_file, preset_cappella_url, vocals_path)
+                    _f2 = _dl.submit(download_file, preset_accompaniment_url, instrumental_path)
+                    _f1.result()
+                    _f2.result()
                 separation_engine = "preset"
                 separation_time = time.time() - t
                 # 补算 duration（用 accompaniment 长度，跟原曲一致）
