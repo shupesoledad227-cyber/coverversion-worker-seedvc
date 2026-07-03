@@ -26,17 +26,27 @@ import torchaudio
 # Seed-VC inference 由子进程执行（cwd=SEED_VC_DIR），父进程不需要导入其模块
 SEED_VC_DIR = "/app/seed-vc"
 
+# ── 日志统一带 request_id 前缀（task_id 前 8 位），便于并发 job 日志追踪 ──
+import sys as _sys
+_log_task_id = ""
+
+
+def jlog(msg):
+    prefix = f"[{_log_task_id}] " if _log_task_id else ""
+    _sys.stdout.write(f"{prefix}{msg}\n")
+    _sys.stdout.flush()
+
 
 def download_file(url: str, dest_path: str):
     """Download a file from URL to local path."""
-    print(f"[Download] {url}")
+    jlog(f"[Download] {url}")
     resp = requests.get(url, stream=True, timeout=300)
     resp.raise_for_status()
     with open(dest_path, "wb") as f:
         for chunk in resp.iter_content(chunk_size=8192):
             f.write(chunk)
     size_mb = os.path.getsize(dest_path) / (1024 * 1024)
-    print(f"[Download] Done: {size_mb:.1f} MB")
+    jlog(f"[Download] Done: {size_mb:.1f} MB")
 
 
 # 默认封面统一存放于 CDN 加速域名下的固定目录
@@ -68,7 +78,7 @@ def classify_gender(voice_path: str):
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             _gender_model.to(device)
             _gender_model._device = device
-            print(f"[Gender] Model loaded on {device} in {_t.time()-t_load:.1f}s")
+            jlog(f"[Gender] Model loaded on {device} in {_t.time()-t_load:.1f}s")
         audio = _gender_model.load_audio(voice_path).to(_gender_model._device)
         with torch.no_grad():
             logits = _gender_model.forward(audio)
@@ -77,11 +87,11 @@ def classify_gender(voice_path: str):
             gender = _gender_model.pred2gender[idx]
             conf = float(probs[0][idx].item())
         elapsed = _t.time() - t0
-        print(f"[Gender] {gender} (conf={conf:.0%}), took {elapsed:.2f}s")
+        jlog(f"[Gender] {gender} (conf={conf:.0%}), took {elapsed:.2f}s")
         return gender, conf, elapsed
     except Exception as e:
         elapsed = _t.time() - t0
-        print(f"[Gender] FAILED ({e}), fallback to F0-threshold only, took {elapsed:.2f}s")
+        jlog(f"[Gender] FAILED ({e}), fallback to F0-threshold only, took {elapsed:.2f}s")
         return None, 0.0, elapsed
 
 
@@ -127,7 +137,7 @@ def build_oss_public_url(bucket_name: str, endpoint: str, object_key: str) -> st
 def upload_file(file_path: str, filename: str, max_retries: int = 3) -> str:
     """Upload file to Aliyun OSS with retry, return public URL."""
     size_mb = os.path.getsize(file_path) / 1024 / 1024
-    print(f"[Upload] Uploading {filename} ({size_mb:.1f} MB)...")
+    jlog(f"[Upload] Uploading {filename} ({size_mb:.1f} MB)...")
 
     endpoint = get_required_env("ALIYUN_OSS_ENDPOINT")
     bucket_name = get_required_env("ALIYUN_OSS_BUCKET")
@@ -157,10 +167,10 @@ def upload_file(file_path: str, filename: str, max_retries: int = 3) -> str:
             if result.status != 200:
                 raise RuntimeError(f"OSS upload returned status {result.status}")
             url = build_oss_public_url(bucket_name, endpoint, object_key)
-            print(f"[Upload] Done: {url}")
+            jlog(f"[Upload] Done: {url}")
             return url
         except Exception as e:
-            print(f"[Upload] Attempt {attempt}/{max_retries} failed: {e}")
+            jlog(f"[Upload] Attempt {attempt}/{max_retries} failed: {e}")
             if attempt < max_retries:
                 time.sleep(3)  # 等 3 秒重试
             else:
@@ -169,7 +179,7 @@ def upload_file(file_path: str, filename: str, max_retries: int = 3) -> str:
 
 def separate_vocals(song_path: str, output_dir: str, shifts: int = 0):
     """Separate vocals and instrumental using demucs."""
-    print(f"[Demucs] Separating vocals (shifts={shifts})...")
+    jlog(f"[Demucs] Separating vocals (shifts={shifts})...")
     cmd = [
         "python", "-m", "demucs",
         "-n", "htdemucs",
@@ -190,13 +200,13 @@ def separate_vocals(song_path: str, output_dir: str, shifts: int = 0):
     if not os.path.exists(vocals_path):
         raise RuntimeError(f"Vocals not found: {os.listdir(separated_dir)}")
 
-    print(f"[Demucs] Done.")
+    jlog(f"[Demucs] Done.")
     return vocals_path, instrumental_path
 
 
 def separate_karaoke(vocals_path: str, output_dir: str):
     """Separate lead vocals from backing vocals using BS Roformer Karaoke model."""
-    print(f"[Karaoke] Separating lead/backing vocals...")
+    jlog(f"[Karaoke] Separating lead/backing vocals...")
     os.makedirs(output_dir, exist_ok=True)
 
     # Copy vocals to a temp input folder (MSST reads from folder, not single file)
@@ -215,9 +225,9 @@ def separate_karaoke(vocals_path: str, output_dir: str):
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd="/app/msst")
     if result.stdout:
-        print(f"[Karaoke] STDOUT: {result.stdout[-300:]}")
+        jlog(f"[Karaoke] STDOUT: {result.stdout[-300:]}")
     if result.returncode != 0:
-        print(f"[Karaoke] STDERR: {result.stderr[-300:]}")
+        jlog(f"[Karaoke] STDERR: {result.stderr[-300:]}")
         raise RuntimeError(f"Karaoke failed: {result.stderr[-300:]}")
 
     # Find lead and backing vocals (MSST creates subdirectories)
@@ -236,12 +246,12 @@ def separate_karaoke(vocals_path: str, output_dir: str):
                 backing_path = full
             elif 'vocal' in lower:
                 lead_path = full
-    print(f"[Karaoke] Output files: {all_files}")
+    jlog(f"[Karaoke] Output files: {all_files}")
 
     if not lead_path:
         raise RuntimeError(f"Karaoke lead vocals not found in: {all_files}")
 
-    print(f"[Karaoke] Done: lead={os.path.basename(lead_path)}, backing={os.path.basename(backing_path) if backing_path else 'none'}")
+    jlog(f"[Karaoke] Done: lead={os.path.basename(lead_path)}, backing={os.path.basename(backing_path) if backing_path else 'none'}")
     return lead_path, backing_path
 
 
@@ -263,7 +273,7 @@ def run_seed_vc_direct(source_path: str, target_path: str, output_path: str,
     ckpt_name = MODEL_VERSIONS.get(model_version, MODEL_VERSIONS["fine_tuned_v2"])
     ckpt_path = os.path.join(SEED_VC_DIR, "checkpoints", "Seed-VC", ckpt_name)
     config_path = os.path.join(SEED_VC_DIR, "configs", "presets", "config_dit_mel_seed_uvit_whisper_base_f0_44k.yml")
-    print(f"[Inference] Model: {model_version} → {ckpt_name}")
+    jlog(f"[Inference] Model: {model_version} → {ckpt_name}")
 
     cmd = [
         "python", os.path.join(SEED_VC_DIR, "inference.py"),
@@ -281,22 +291,22 @@ def run_seed_vc_direct(source_path: str, target_path: str, output_path: str,
         "--fp16", "True",
     ]
 
-    print(f"[Inference] Starting Seed-VC...")
+    jlog(f"[Inference] Starting Seed-VC...")
     start = time.time()
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=SEED_VC_DIR)
     elapsed = time.time() - start
 
-    print(f"[Inference] Done in {elapsed:.1f}s, exit={result.returncode}")
+    jlog(f"[Inference] Done in {elapsed:.1f}s, exit={result.returncode}")
     if result.stderr:
         # Extract RTF line
         for line in result.stderr.split('\n'):
             if 'RTF' in line:
-                print(f"[Inference] {line.strip()}")
+                jlog(f"[Inference] {line.strip()}")
 
     if result.returncode != 0:
         # 完整打印 stderr 到日志，方便排查（不截断）
-        print(f"[Inference] FULL STDERR:\n{result.stderr}")
-        print(f"[Inference] FULL STDOUT:\n{result.stdout}")
+        jlog(f"[Inference] FULL STDERR:\n{result.stderr}")
+        jlog(f"[Inference] FULL STDOUT:\n{result.stdout}")
         raise RuntimeError(f"Seed-VC failed: {result.stderr[-2000:]}")
 
     # Find output file
@@ -336,7 +346,7 @@ def _get_rmvpe():
         use_cuda = torch.cuda.is_available()
         _rmvpe_model = RMVPE(model_path, is_half=use_cuda,
                              device='cuda' if use_cuda else 'cpu')
-        print(f"[F0] RMVPE loaded on {'cuda' if use_cuda else 'cpu'} in {_t.time()-t0:.1f}s")
+        jlog(f"[F0] RMVPE loaded on {'cuda' if use_cuda else 'cpu'} in {_t.time()-t0:.1f}s")
     return _rmvpe_model
 
 
@@ -371,9 +381,9 @@ def analyze_vocal_f0(vocals_path: str, use_rmvpe: bool = False) -> dict:
                     best_energy = energy
                     best_start = i
             y = y[best_start * sr : (best_start + window) * sr]
-            print(f"[F0] Using loudest 30s segment starting at {best_start}s (total {duration:.0f}s)")
+            jlog(f"[F0] Using loudest 30s segment starting at {best_start}s (total {duration:.0f}s)")
         else:
-            print(f"[F0] Audio is {duration:.1f}s, analyzing full track")
+            jlog(f"[F0] Audio is {duration:.1f}s, analyzing full track")
 
         engine = "pyin"
         valid = None
@@ -384,7 +394,7 @@ def analyze_vocal_f0(vocals_path: str, use_rmvpe: bool = False) -> dict:
                 valid = f0[f0 > 0]
                 engine = "rmvpe"
             except Exception as e:
-                print(f"[F0] RMVPE failed ({e}), falling back to pyin")
+                jlog(f"[F0] RMVPE failed ({e}), falling back to pyin")
                 valid = None
 
         if valid is None:
@@ -408,7 +418,7 @@ def analyze_vocal_f0(vocals_path: str, use_rmvpe: bool = False) -> dict:
         f0_trimmed_mean = float(np.mean(trimmed)) if len(trimmed) > 0 else f0_mean
 
         note = librosa.hz_to_note(f0_median)
-        print(f"[F0] ({engine}) median={f0_median:.1f}Hz mean={f0_mean:.1f}Hz trimmed={f0_trimmed_mean:.1f}Hz note={note} valid_frames={len(valid)}")
+        jlog(f"[F0] ({engine}) median={f0_median:.1f}Hz mean={f0_mean:.1f}Hz trimmed={f0_trimmed_mean:.1f}Hz note={note} valid_frames={len(valid)}")
         return {
             "ok": True,
             "f0_median": round(f0_median, 1),
@@ -419,7 +429,7 @@ def analyze_vocal_f0(vocals_path: str, use_rmvpe: bool = False) -> dict:
             "engine": engine,
         }
     except Exception as e:
-        print(f"[F0] Analysis failed: {e}")
+        jlog(f"[F0] Analysis failed: {e}")
         return {"ok": False, "error": str(e)}
 
 
@@ -523,7 +533,7 @@ def mix_audio(vocals_path: str, instrumental_path: str, output_path: str,
     from pedalboard import Pedalboard, Reverb, Compressor, HighpassFilter, Gain
     from pedalboard.io import AudioFile
 
-    print(f"[Mix] Processing: vocal_vol={vocal_volume}, inst_vol={instrumental_volume}, reverb={reverb}")
+    jlog(f"[Mix] Processing: vocal_vol={vocal_volume}, inst_vol={instrumental_volume}, reverb={reverb}")
 
     # ── Step 1: 处理人声音效（pedalboard）──────────────────────
     # 读取人声
@@ -537,7 +547,7 @@ def mix_audio(vocals_path: str, instrumental_path: str, output_path: str,
         vocal_audio, silent_regions, total_muted = zero_out_silent_segments(
             vocal_audio, original_cappella_path, vocal_sr,
             threshold_db=-50, min_silence_sec=0.5, fade_ms=20)
-        print(f"[Silence Mute] {len(silent_regions)} regions muted "
+        jlog(f"[Silence Mute] {len(silent_regions)} regions muted "
               f"({total_muted:.1f}s total), took {_t.time()-_t0:.2f}s")
 
     # Fade-in/out：消除起始"噗"声和结尾"咔嗒"声
@@ -598,7 +608,7 @@ def mix_audio(vocals_path: str, instrumental_path: str, output_path: str,
     with AudioFile(processed_vocal_path, 'w', vocal_sr, processed_vocal.shape[0]) as f:
         f.write(processed_vocal)
 
-    print(f"[Mix] Vocal effects applied: {len(vocal_effects)} effects")
+    jlog(f"[Mix] Vocal effects applied: {len(vocal_effects)} effects")
 
     # ── Step 2: 处理伴奏（模拟 AU 的"夜总会楼下" EQ）────────
     # 读取伴奏
@@ -633,7 +643,7 @@ def mix_audio(vocals_path: str, instrumental_path: str, output_path: str,
     with AudioFile(processed_inst_path, 'w', inst_sr, processed_inst.shape[0]) as f:
         f.write(processed_inst)
 
-    print(f"[Mix] Instrumental effects applied: {len(inst_effects)} effects")
+    jlog(f"[Mix] Instrumental effects applied: {len(inst_effects)} effects")
 
     # ── Step 3: 混合人声+伴奏（ffmpeg）────────────────────────
     mix_filter = "[0:a][1:a]amix=inputs=2:duration=longest:weights=1 1:normalize=0"
@@ -641,7 +651,7 @@ def mix_audio(vocals_path: str, instrumental_path: str, output_path: str,
         # -1dBFS true-peak limiter：5ms lookahead 平滑压峰，替代 16bit 写盘时的硬剪破音
         # limit=0.891 ≈ -1dBFS；level=false 不做自动补增益（保持整体响度不变）
         mix_filter += ",alimiter=limit=0.891:attack=5:release=100:level=false"
-        print(f"[Mix] Limiter enabled (-1dBFS ceiling)")
+        jlog(f"[Mix] Limiter enabled (-1dBFS ceiling)")
     cmd = [
         "ffmpeg", "-y",
         "-i", processed_vocal_path,
@@ -654,7 +664,7 @@ def mix_audio(vocals_path: str, instrumental_path: str, output_path: str,
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg mix failed: {result.stderr[-300:]}")
-    print(f"[Mix] Done.")
+    jlog(f"[Mix] Done.")
 
 
 def handler(job):
@@ -663,7 +673,7 @@ def handler(job):
 
     # Warmup mode: Worker 已启动，直接返回
     if job_input.get("mode") == "warmup":
-        print("[Warmup] Worker is warm and ready.")
+        jlog("[Warmup] Worker is warm and ready.")
         return {"status": "warm", "message": "Worker is ready"}
 
     # Diagnose mode: 返回 worker 内部状态（环境变量、缓存目录、文件清单）
@@ -700,6 +710,9 @@ def handler(job):
         return info
 
     task_id = job_input.get("task_id", "unknown")
+    # 日志前缀 = request_id（task_id 前 8 位）；worker 单 job 串行，无并发覆盖问题
+    global _log_task_id
+    _log_task_id = str(task_id)[:8]
     song_url = job_input["song_url"]
     voice_url = job_input["voice_url"]
     pitch_shift = int(job_input.get("pitch_shift", 0))
@@ -735,13 +748,13 @@ def handler(job):
     # 固定使用 fine_tuned_v2（最佳）
     model_version = "fine_tuned_v2"
 
-    print(f"\n{'='*60}")
-    print(f"[Job] task_id={task_id}, pitch={pitch_shift}, steps={diffusion_steps}")
-    print(f"[Job] cfg_rate={cfg_rate}, vocal_vol={vocal_volume}, inst_vol={instrumental_volume}, reverb={reverb}")
-    print(f"[Job] auto_f0={auto_f0_adjust}, karaoke={karaoke_enabled}, client_song_f0={client_song_f0 if client_song_f0 > 0 else 'none'}")
-    print(f"[Job] env={env}, use_preset_separation={use_preset_separation} "
+    jlog(f"\n{'='*60}")
+    jlog(f"[Job] task_id={task_id}, pitch={pitch_shift}, steps={diffusion_steps}")
+    jlog(f"[Job] cfg_rate={cfg_rate}, vocal_vol={vocal_volume}, inst_vol={instrumental_volume}, reverb={reverb}")
+    jlog(f"[Job] auto_f0={auto_f0_adjust}, karaoke={karaoke_enabled}, client_song_f0={client_song_f0 if client_song_f0 > 0 else 'none'}")
+    jlog(f"[Job] env={env}, use_preset_separation={use_preset_separation} "
           f"(cappella={'yes' if preset_cappella_url else 'no'}, accompaniment={'yes' if preset_accompaniment_url else 'no'})")
-    print(f"{'='*60}")
+    jlog(f"{'='*60}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
@@ -771,9 +784,9 @@ def handler(job):
             download_time = time.time() - t
 
             if song_duration is not None:
-                print(f"[Job] Song: {song_duration:.1f}s, Download: {download_time:.1f}s")
+                jlog(f"[Job] Song: {song_duration:.1f}s, Download: {download_time:.1f}s")
             else:
-                print(f"[Job] Preset mode, song_url skipped; Download: {download_time:.1f}s")
+                jlog(f"[Job] Preset mode, song_url skipped; Download: {download_time:.1f}s")
 
             # ── Stage 2 + 2.1: Vocal separation ─────────────────
             # use_preset_separation 为真（env=test 且 cappella/accompaniment 两 URL 都有）→
@@ -806,7 +819,7 @@ def handler(job):
                         song_duration = info.num_frames / info.sample_rate
                     except Exception:
                         song_duration = 0  # 拿不到也不阻塞，仅日志缺失
-                print(f"[Job] Preset separation (skip Demucs+Karaoke): {separation_time:.1f}s, "
+                jlog(f"[Job] Preset separation (skip Demucs+Karaoke): {separation_time:.1f}s, "
                       f"song_duration={song_duration:.1f}s")
             else:
                 runpod.serverless.progress_update(job, {
@@ -817,7 +830,7 @@ def handler(job):
                     song_path, demucs_output_dir, shifts=demucs_shifts)
                 separation_engine = "demucs"  # 固定 demucs
                 separation_time = time.time() - t
-                print(f"[Job] Separation ({separation_engine}): {separation_time:.1f}s")
+                jlog(f"[Job] Separation ({separation_engine}): {separation_time:.1f}s")
 
                 # ── Stage 2.1: Karaoke separation (optional) ────────
                 if karaoke_enabled:
@@ -827,7 +840,7 @@ def handler(job):
                     vocals_path = lead_path  # 只转换主唱
                     backing_vocals_path = backing_path
                     karaoke_time = time.time() - t
-                    print(f"[Job] Karaoke: {karaoke_time:.1f}s")
+                    jlog(f"[Job] Karaoke: {karaoke_time:.1f}s")
 
             # ── Stage 2.5: Analyze original vocal F0 ─────────────
             # 客户端如果传了 song_f0（针对引导页固定歌曲预先算好），跳过 librosa.pyin
@@ -839,12 +852,12 @@ def handler(job):
                     "source": "client",
                 }
                 f0_analysis_time = 0.0
-                print(f"[Job] F0 from client: {client_song_f0}Hz (skip librosa)")
+                jlog(f"[Job] F0 from client: {client_song_f0}Hz (skip librosa)")
             else:
                 t = time.time()
                 song_vocal_f0 = analyze_vocal_f0(vocals_path, use_rmvpe=is_test_env)
                 f0_analysis_time = time.time() - t
-                print(f"[Job] F0 Analysis: {f0_analysis_time:.1f}s")
+                jlog(f"[Job] F0 Analysis: {f0_analysis_time:.1f}s")
 
             # ── Stage 2.6: Auto pitch_shift (if user_f0 provided) ──
             import math
@@ -880,13 +893,13 @@ def handler(job):
                 else:
                     # 正值：除以 3 再四舍五入，最大 +12（升调过猛容易花栗鼠音）
                     pitch_shift = min(12, round(raw_shift / 3))
-                print(f"[Job] Auto pitch_shift: user_f0={user_f0:.1f}Hz, song_f0={song_f0:.1f}Hz, "
+                jlog(f"[Job] Auto pitch_shift: user_f0={user_f0:.1f}Hz, song_f0={song_f0:.1f}Hz, "
                       f"raw={raw_shift:.2f}, applied={pitch_shift} (original={original_pitch_shift}"
                       f"{', gender=' + str(voice_gender) + ' conf=%.0f%%' % (gender_conf*100) if voice_gender else ''})")
             else:
-                print(f"[Job] Manual pitch_shift: {pitch_shift} (user_f0={'%.1f' % user_f0 if user_f0 > 0 else 'not provided'})")
-            print(f"[Job] song_vocal_f0={song_vocal_f0}")
-            print(f"[Job] original_pitch_shift={original_pitch_shift}, applied_pitch_shift={pitch_shift}")
+                jlog(f"[Job] Manual pitch_shift: {pitch_shift} (user_f0={'%.1f' % user_f0 if user_f0 > 0 else 'not provided'})")
+            jlog(f"[Job] song_vocal_f0={song_vocal_f0}")
+            jlog(f"[Job] original_pitch_shift={original_pitch_shift}, applied_pitch_shift={pitch_shift}")
 
             # ── Stage 3: Voice conversion ────────────────────────
             runpod.serverless.progress_update(job, {
@@ -904,7 +917,7 @@ def handler(job):
                 auto_f0_adjust=auto_f0_adjust
             )
             conversion_time = time.time() - t
-            print(f"[Job] Conversion: {conversion_time:.1f}s")
+            jlog(f"[Job] Conversion: {conversion_time:.1f}s")
 
             # ── Stage 4: Mix ─────────────────────────────────────
             runpod.serverless.progress_update(job, {
@@ -927,7 +940,7 @@ def handler(job):
                 subprocess.run(mix_cmd, capture_output=True, timeout=120)
                 if os.path.exists(inst_with_backing):
                     instrumental_path = inst_with_backing
-                    print(f"[Mix] Backing vocals merged into instrumental")
+                    jlog(f"[Mix] Backing vocals merged into instrumental")
 
             final_output = os.path.join(tmpdir, "final_cover.wav")
             # env=test 时启用"cappella 静音段消音"，消除 Seed-VC 前奏/间奏/尾奏幻听
@@ -962,7 +975,7 @@ def handler(job):
                         download_file(cover_url, cover_path)
                     except Exception:
                         cover_path = None
-                        print(f"[Cover] 封面下载失败，跳过")
+                        jlog(f"[Cover] 封面下载失败，跳过")
 
                 # 构建 metadata 参数
                 metadata_args = []
@@ -984,10 +997,10 @@ def handler(job):
                         "-disposition:v", "attached_pic",
                         "-id3v2_version", "3",
                     ] + metadata_args + [mp3_output]
-                    print(f"[Format] MP3 {bitrate} + cover + metadata: artist={artist_name}, title={song_title}")
+                    jlog(f"[Format] MP3 {bitrate} + cover + metadata: artist={artist_name}, title={song_title}")
                 else:
                     convert_cmd = ["ffmpeg", "-y", "-i", final_output, "-b:a", bitrate] + metadata_args + [mp3_output]
-                    print(f"[Format] MP3 {bitrate} + metadata (no cover)")
+                    jlog(f"[Format] MP3 {bitrate} + metadata (no cover)")
 
                 subprocess.run(convert_cmd, capture_output=True, timeout=60)
                 if os.path.exists(mp3_output):
@@ -996,7 +1009,7 @@ def handler(job):
             output_size_mb = os.path.getsize(final_output) / (1024 * 1024)
             file_ext = os.path.splitext(final_output)[1]  # .wav or .mp3
             format_time = time.time() - t
-            print(f"[Job] Format:     {format_time:.1f}s")
+            jlog(f"[Job] Format:     {format_time:.1f}s")
 
             # ── Stage 6: Upload ──────────────────────────────────
             runpod.serverless.progress_update(job, {
@@ -1009,22 +1022,22 @@ def handler(job):
 
             total_time = time.time() - total_start
 
-            print(f"\n[Job] === SUMMARY ===")
-            print(f"[Job] 1.Download:       {download_time:.1f}s")
-            print(f"[Job] 2.Separation:     {separation_time:.1f}s ({separation_engine})")
+            jlog(f"\n[Job] === SUMMARY ===")
+            jlog(f"[Job] 1.Download:       {download_time:.1f}s")
+            jlog(f"[Job] 2.Separation:     {separation_time:.1f}s ({separation_engine})")
             if karaoke_enabled:
-                print(f"[Job] 3.Karaoke:        {karaoke_time:.1f}s (lead/backing split)")
-            print(f"[Job] 4.F0 Analyze:     {f0_analysis_time:.1f}s"
+                jlog(f"[Job] 3.Karaoke:        {karaoke_time:.1f}s (lead/backing split)")
+            jlog(f"[Job] 4.F0 Analyze:     {f0_analysis_time:.1f}s"
                   + (f" ({song_vocal_f0['engine']})" if song_vocal_f0.get("engine") else ""))
             if gender_time:
-                print(f"[Job] 4b.Gender:        {gender_time:.1f}s ({voice_gender}, conf={gender_conf:.0%})")
-            print(f"[Job] 5.Conversion:     {conversion_time:.1f}s (Seed-VC)")
-            print(f"[Job] 6.Mix:            {mix_time:.1f}s")
-            print(f"[Job] 7.Format:         {format_time:.1f}s")
-            print(f"[Job] 8.Upload:         {upload_time:.1f}s (final)")
-            print(f"[Job] ──────────────────")
-            print(f"[Job] TOTAL:            {total_time:.1f}s")
-            print(f"[Job] Output:     {output_duration:.1f}s, {output_size_mb:.1f} MB")
+                jlog(f"[Job] 4b.Gender:        {gender_time:.1f}s ({voice_gender}, conf={gender_conf:.0%})")
+            jlog(f"[Job] 5.Conversion:     {conversion_time:.1f}s (Seed-VC)")
+            jlog(f"[Job] 6.Mix:            {mix_time:.1f}s")
+            jlog(f"[Job] 7.Format:         {format_time:.1f}s")
+            jlog(f"[Job] 8.Upload:         {upload_time:.1f}s (final)")
+            jlog(f"[Job] ──────────────────")
+            jlog(f"[Job] TOTAL:            {total_time:.1f}s")
+            jlog(f"[Job] Output:     {output_duration:.1f}s, {output_size_mb:.1f} MB")
 
             return {
                 "task_id": task_id,
@@ -1063,5 +1076,5 @@ def handler(job):
 
 
 if __name__ == "__main__":
-    print("[Init] Seed-VC Cover Song Worker v2")
+    jlog("[Init] Seed-VC Cover Song Worker v2")
     runpod.serverless.start({"handler": handler})
