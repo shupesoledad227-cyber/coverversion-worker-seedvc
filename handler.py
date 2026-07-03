@@ -312,9 +312,39 @@ def run_seed_vc_direct(source_path: str, target_path: str, output_path: str,
     return output_path
 
 
-def analyze_vocal_f0(vocals_path: str) -> dict:
+# RMVPE F0 提取器（GPU，Seed-VC 镜像自带权重）——懒加载全局单例
+# 换它的动机：pyin 纯 CPU，多 worker 同宿主机并发时被抢到 17-19s
+#（同音频单独跑仅 2s，日志实锤）；RMVPE 走每 worker 独占的 GPU，不受争抢，<0.5s 稳定。
+_rmvpe_model = None
+
+
+def _get_rmvpe():
+    global _rmvpe_model
+    if _rmvpe_model is None:
+        import time as _t
+        import sys as _sys
+        import torch
+        t0 = _t.time()
+        if SEED_VC_DIR not in _sys.path:
+            _sys.path.insert(0, SEED_VC_DIR)
+        from modules.rmvpe import RMVPE
+        from huggingface_hub import hf_hub_download
+        # 镜像构建时已缓存，运行时秒回本地路径不联网
+        model_path = hf_hub_download(
+            repo_id='lj1995/VoiceConversionWebUI', filename='rmvpe.pt',
+            cache_dir=os.path.join(SEED_VC_DIR, 'checkpoints'))
+        use_cuda = torch.cuda.is_available()
+        _rmvpe_model = RMVPE(model_path, is_half=use_cuda,
+                             device='cuda' if use_cuda else 'cpu')
+        print(f"[F0] RMVPE loaded on {'cuda' if use_cuda else 'cpu'} in {_t.time()-t0:.1f}s")
+    return _rmvpe_model
+
+
+def analyze_vocal_f0(vocals_path: str, use_rmvpe: bool = False) -> dict:
     """
-    Analyze F0 (fundamental frequency) of a clean vocal track using librosa.pyin.
+    Analyze F0 (fundamental frequency) of a clean vocal track.
+    use_rmvpe=True → GPU RMVPE（test 闸门）；失败自动回退 pyin。
+    use_rmvpe=False → librosa.pyin（prod 现状）。
     Returns median/mean F0 and musical note name.
     """
     try:
@@ -345,15 +375,28 @@ def analyze_vocal_f0(vocals_path: str) -> dict:
         else:
             print(f"[F0] Audio is {duration:.1f}s, analyzing full track")
 
-        # pyin: probabilistic YIN, higher quality than plain YIN
-        f0, voiced_flag, voiced_probs = librosa.pyin(
-            y,
-            fmin=librosa.note_to_hz('C2'),   # ~65Hz (男低音下限)
-            fmax=librosa.note_to_hz('C6'),   # ~1047Hz (女高音上限)
-            sr=sr,
-            frame_length=2048,
-        )
-        valid = f0[~np.isnan(f0)]
+        engine = "pyin"
+        valid = None
+        if use_rmvpe:
+            try:
+                model = _get_rmvpe()
+                f0 = model.infer_from_audio(y, thred=0.03)
+                valid = f0[f0 > 0]
+                engine = "rmvpe"
+            except Exception as e:
+                print(f"[F0] RMVPE failed ({e}), falling back to pyin")
+                valid = None
+
+        if valid is None:
+            # pyin: probabilistic YIN, higher quality than plain YIN
+            f0, voiced_flag, voiced_probs = librosa.pyin(
+                y,
+                fmin=librosa.note_to_hz('C2'),   # ~65Hz (男低音下限)
+                fmax=librosa.note_to_hz('C6'),   # ~1047Hz (女高音上限)
+                sr=sr,
+                frame_length=2048,
+            )
+            valid = f0[~np.isnan(f0)]
         if len(valid) == 0:
             return {"ok": False, "error": "no voiced frames"}
 
@@ -365,7 +408,7 @@ def analyze_vocal_f0(vocals_path: str) -> dict:
         f0_trimmed_mean = float(np.mean(trimmed)) if len(trimmed) > 0 else f0_mean
 
         note = librosa.hz_to_note(f0_median)
-        print(f"[F0] median={f0_median:.1f}Hz mean={f0_mean:.1f}Hz trimmed={f0_trimmed_mean:.1f}Hz note={note} valid_frames={len(valid)}")
+        print(f"[F0] ({engine}) median={f0_median:.1f}Hz mean={f0_mean:.1f}Hz trimmed={f0_trimmed_mean:.1f}Hz note={note} valid_frames={len(valid)}")
         return {
             "ok": True,
             "f0_median": round(f0_median, 1),
@@ -373,6 +416,7 @@ def analyze_vocal_f0(vocals_path: str) -> dict:
             "f0_trimmed_mean": round(f0_trimmed_mean, 1),
             "note": note,
             "valid_frames": int(len(valid)),
+            "engine": engine,
         }
     except Exception as e:
         print(f"[F0] Analysis failed: {e}")
@@ -798,7 +842,7 @@ def handler(job):
                 print(f"[Job] F0 from client: {client_song_f0}Hz (skip librosa)")
             else:
                 t = time.time()
-                song_vocal_f0 = analyze_vocal_f0(vocals_path)
+                song_vocal_f0 = analyze_vocal_f0(vocals_path, use_rmvpe=is_test_env)
                 f0_analysis_time = time.time() - t
                 print(f"[Job] F0 Analysis: {f0_analysis_time:.1f}s")
 
@@ -970,7 +1014,8 @@ def handler(job):
             print(f"[Job] 2.Separation:     {separation_time:.1f}s ({separation_engine})")
             if karaoke_enabled:
                 print(f"[Job] 3.Karaoke:        {karaoke_time:.1f}s (lead/backing split)")
-            print(f"[Job] 4.F0 Analyze:     {f0_analysis_time:.1f}s")
+            print(f"[Job] 4.F0 Analyze:     {f0_analysis_time:.1f}s"
+                  + (f" ({song_vocal_f0['engine']})" if song_vocal_f0.get("engine") else ""))
             if gender_time:
                 print(f"[Job] 4b.Gender:        {gender_time:.1f}s ({voice_gender}, conf={gender_conf:.0%})")
             print(f"[Job] 5.Conversion:     {conversion_time:.1f}s (Seed-VC)")
