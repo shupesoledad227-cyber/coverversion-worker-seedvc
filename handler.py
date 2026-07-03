@@ -42,6 +42,48 @@ def download_file(url: str, dest_path: str):
 # 默认封面统一存放于 CDN 加速域名下的固定目录
 DEFAULT_COVER_CDN_BASE = "https://lightsing-oss.cstarsage.com/cover-song-uploads/default"
 
+# ── 声学性别分类（ECAPA-TDNN，见 gender_model.py 头注释）────────────
+# 用于 pitch_shift 决策：F0<175 的低嗓老年女性（如 161Hz 大娘）会被 F0 阈值
+# 误判为男声而强行降调出电音；共振峰特征不受 F0 影响，判女则走不降调安全路径。
+GENDER_MODEL_DIR = "/app/gender-classifier"   # Dockerfile 预下载权重于此
+_gender_model = None
+
+
+def classify_gender(voice_path: str):
+    """
+    对用户 voice 音频判性别。返回 (gender:'male'|'female', confidence:float, elapsed:float)。
+    模型懒加载全局单例（首次 ~1-2s，之后 <0.5s/次）。失败返回 (None, 0, elapsed)，
+    调用方按"未知"处理（回退 F0 阈值逻辑），不阻断任务。
+    """
+    global _gender_model
+    import time as _t
+    t0 = _t.time()
+    try:
+        import torch
+        from gender_model import ECAPA_gender
+        if _gender_model is None:
+            t_load = _t.time()
+            _gender_model = ECAPA_gender.from_pretrained(GENDER_MODEL_DIR)
+            _gender_model.eval()
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            _gender_model.to(device)
+            _gender_model._device = device
+            print(f"[Gender] Model loaded on {device} in {_t.time()-t_load:.1f}s")
+        audio = _gender_model.load_audio(voice_path).to(_gender_model._device)
+        with torch.no_grad():
+            logits = _gender_model.forward(audio)
+            probs = torch.softmax(logits, dim=1)
+            idx = int(probs.argmax(dim=1).item())
+            gender = _gender_model.pred2gender[idx]
+            conf = float(probs[0][idx].item())
+        elapsed = _t.time() - t0
+        print(f"[Gender] {gender} (conf={conf:.0%}), took {elapsed:.2f}s")
+        return gender, conf, elapsed
+    except Exception as e:
+        elapsed = _t.time() - t0
+        print(f"[Gender] FAILED ({e}), fallback to F0-threshold only, took {elapsed:.2f}s")
+        return None, 0.0, elapsed
+
 
 def resolve_cover_url(cover_image: str) -> str:
     """把客户端传入的封面标识解析成可下载的 URL。
@@ -758,13 +800,26 @@ def handler(job):
             # ── Stage 2.6: Auto pitch_shift (if user_f0 provided) ──
             import math
             original_pitch_shift = pitch_shift
+            voice_gender = None
+            gender_conf = 0.0
+            gender_time = 0
             if user_f0 > 0 and song_vocal_f0.get("ok") and song_vocal_f0["f0_median"] > 0:
                 song_f0 = song_vocal_f0["f0_median"]
                 raw_shift = 12 * math.log2(user_f0 / song_f0)
                 if raw_shift < 0:
                     # 负值（用户声音比歌曲低）：按男女声分别处理
                     # 175Hz 为分界点（保守偏女，避免把女中音误判为男声而过度降调）
-                    if user_f0 < 175:
+                    # env=test 新增声学性别 OR 条件：低嗓老年女性（如 161Hz 大娘）F0 阈值
+                    # 会误判男声导致降调电音；共振峰性别模型不受 F0 影响（57 voice 实测
+                    # 96-100%），任一信号说"女"就走不降调安全路径（误判成本不对称：
+                    # 女判男=电音灾难，男判女=仅贴合度略差）。
+                    # 验证 OK 后想推全量：把下面 is_test_env 判断去掉即可
+                    if is_test_env:
+                        voice_gender, gender_conf, gender_time = classify_gender(voice_path)
+                        is_female = (user_f0 >= 175) or (voice_gender == "female")
+                    else:
+                        is_female = user_f0 >= 175
+                    if not is_female:
                         # 男声：F0 通常 85-180Hz，嗓子能 hold 住较大幅度降调，取 3/4
                         # 让歌更贴近男声自然音域，听感顺畅。最小 -12。
                         pitch_shift = max(-12, round(raw_shift * 3 / 4))
@@ -777,7 +832,8 @@ def handler(job):
                     # 正值：除以 3 再四舍五入，最大 +12（升调过猛容易花栗鼠音）
                     pitch_shift = min(12, round(raw_shift / 3))
                 print(f"[Job] Auto pitch_shift: user_f0={user_f0:.1f}Hz, song_f0={song_f0:.1f}Hz, "
-                      f"raw={raw_shift:.2f}, applied={pitch_shift} (original={original_pitch_shift})")
+                      f"raw={raw_shift:.2f}, applied={pitch_shift} (original={original_pitch_shift}"
+                      f"{', gender=' + str(voice_gender) + ' conf=%.0f%%' % (gender_conf*100) if voice_gender else ''})")
             else:
                 print(f"[Job] Manual pitch_shift: {pitch_shift} (user_f0={'%.1f' % user_f0 if user_f0 > 0 else 'not provided'})")
             print(f"[Job] song_vocal_f0={song_vocal_f0}")
@@ -910,6 +966,8 @@ def handler(job):
             if karaoke_enabled:
                 print(f"[Job] 3.Karaoke:        {karaoke_time:.1f}s (lead/backing split)")
             print(f"[Job] 4.F0 Analyze:     {f0_analysis_time:.1f}s")
+            if gender_time:
+                print(f"[Job] 4b.Gender:        {gender_time:.1f}s ({voice_gender}, conf={gender_conf:.0%})")
             print(f"[Job] 5.Conversion:     {conversion_time:.1f}s (Seed-VC)")
             print(f"[Job] 6.Mix:            {mix_time:.1f}s")
             print(f"[Job] 7.Format:         {format_time:.1f}s")
@@ -940,6 +998,9 @@ def handler(job):
                 "separation_engine": separation_engine,
                 "karaoke_enabled": karaoke_enabled,
                 "karaoke_time": round(karaoke_time, 2) if karaoke_enabled else 0,
+                "voice_gender": voice_gender,
+                "gender_conf": round(gender_conf, 3),
+                "gender_time": round(gender_time, 2),
             }
 
         except Exception as e:

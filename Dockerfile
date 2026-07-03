@@ -76,6 +76,13 @@ hf_hub_download(repo_id='lj1995/VoiceConversionWebUI', filename='rmvpe.pt', cach
 hf_hub_download(repo_id='funasr/campplus', filename='campplus_cn_common.bin', cache_dir='/app/seed-vc/checkpoints'); \
 print('RMVPE + CAMPPlus cached at /app/seed-vc/checkpoints')"
 
+# ── Pre-download 声学性别分类模型（ECAPA-TDNN 59MB，pitch_shift 决策用）──
+# handler.classify_gender 从 /app/gender-classifier 本地加载，运行时不联网
+RUN pip install --no-cache-dir safetensors && python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('JaesungHuh/voice-gender-classifier', local_dir='/app/gender-classifier'); \
+print('Gender classifier cached at /app/gender-classifier')"
+
 # ── Clone Music-Source-Separation-Training (for BS Roformer inference) ──
 RUN git clone --depth 1 https://github.com/ZFTurbo/Music-Source-Separation-Training.git /app/msst
 # Install MSST inference dependencies (skip GUI/training-only packages)
@@ -111,6 +118,7 @@ ENV TRANSFORMERS_OFFLINE=1
 
 # ── Copy handler ─────────────────────────────────────────────────
 COPY handler.py /app/handler.py
+COPY gender_model.py /app/gender_model.py
 
 # ── Entry point ──────────────────────────────────────────────────
 CMD ["python", "-u", "/app/handler.py"]
