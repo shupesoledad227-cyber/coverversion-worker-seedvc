@@ -57,6 +57,27 @@ DEFAULT_COVER_CDN_BASE = "https://lightsing-oss.cstarsage.com/cover-song-uploads
 # 误判为男声而强行降调出电音；共振峰特征不受 F0 影响，判女则走不降调安全路径。
 GENDER_MODEL_DIR = "/app/gender-classifier"   # Dockerfile 预下载权重于此
 _gender_model = None
+import threading as _threading
+_gender_lock = _threading.Lock()
+
+
+def _get_gender_model():
+    """带锁懒加载（预热线程与首单可能并发进入）"""
+    global _gender_model
+    with _gender_lock:
+        if _gender_model is None:
+            import time as _t
+            import torch
+            from gender_model import ECAPA_gender
+            t_load = _t.time()
+            m = ECAPA_gender.from_pretrained(GENDER_MODEL_DIR)
+            m.eval()
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            m.to(device)
+            m._device = device
+            jlog(f"[Gender] Model loaded on {device} in {_t.time()-t_load:.1f}s")
+            _gender_model = m
+    return _gender_model
 
 
 def classify_gender(voice_path: str):
@@ -65,26 +86,17 @@ def classify_gender(voice_path: str):
     模型懒加载全局单例（首次 ~1-2s，之后 <0.5s/次）。失败返回 (None, 0, elapsed)，
     调用方按"未知"处理（回退 F0 阈值逻辑），不阻断任务。
     """
-    global _gender_model
     import time as _t
     t0 = _t.time()
     try:
         import torch
-        from gender_model import ECAPA_gender
-        if _gender_model is None:
-            t_load = _t.time()
-            _gender_model = ECAPA_gender.from_pretrained(GENDER_MODEL_DIR)
-            _gender_model.eval()
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            _gender_model.to(device)
-            _gender_model._device = device
-            jlog(f"[Gender] Model loaded on {device} in {_t.time()-t_load:.1f}s")
-        audio = _gender_model.load_audio(voice_path).to(_gender_model._device)
+        model = _get_gender_model()
+        audio = model.load_audio(voice_path).to(model._device)
         with torch.no_grad():
-            logits = _gender_model.forward(audio)
+            logits = model.forward(audio)
             probs = torch.softmax(logits, dim=1)
             idx = int(probs.argmax(dim=1).item())
-            gender = _gender_model.pred2gender[idx]
+            gender = model.pred2gender[idx]
             conf = float(probs[0][idx].item())
         elapsed = _t.time() - t0
         jlog(f"[Gender] {gender} (conf={conf:.0%}), took {elapsed:.2f}s")
@@ -326,9 +338,18 @@ def run_seed_vc_direct(source_path: str, target_path: str, output_path: str,
 # 换它的动机：pyin 纯 CPU，多 worker 同宿主机并发时被抢到 17-19s
 #（同音频单独跑仅 2s，日志实锤）；RMVPE 走每 worker 独占的 GPU，不受争抢，<0.5s 稳定。
 _rmvpe_model = None
+_rmvpe_lock = _threading.Lock()
 
 
 def _get_rmvpe():
+    global _rmvpe_model
+    with _rmvpe_lock:
+        if _rmvpe_model is not None:
+            return _rmvpe_model
+        return _load_rmvpe_locked()
+
+
+def _load_rmvpe_locked():
     global _rmvpe_model
     if _rmvpe_model is None:
         import time as _t
@@ -732,17 +753,15 @@ def handler(job):
     karaoke_enabled = bool(job_input.get("karaoke_enabled", False))  # 是否分离主唱和和声
     client_song_f0 = float(job_input.get("song_f0", 0))  # 客户端预先算好的歌曲 F0；> 0 时跳过后端 librosa.pyin 分析
 
-    # ── 新增：测试/正式环境分支 + 客户端预分离 bypass（向后兼容，老客户端不传则走老逻辑）──
-    # env 字段：缺省/"prod" → 完全走老逻辑（即使带了 preset URL 也忽略）
-    #          "test"      → 启用新逻辑（preset URL 不全时仍兜底跑 Demucs/Karaoke）
-    # 验证 OK 后想推全量：把下面 is_test_env 判断去掉即可
+    # ── 客户端预分离 bypass（纯字段驱动，向后兼容：老客户端不传 URL 自然走老逻辑）──
+    # is_test_env 保留作未来新功能的实验闸门；当前 test 与 prod 行为一致
+    # （2026-07 五项已验证推平：preset bypass / song_url skip / 消音 / limiter / gender + RMVPE）
     env = (job_input.get("env") or "prod").strip().lower()
     is_test_env = (env == "test")
     preset_cappella_url = (job_input.get("mp3_url_cappella") or "").strip()
     preset_accompaniment_url = (job_input.get("mp3_url_accompaniment") or "").strip()
     use_preset_separation = (
-        is_test_env
-        and bool(preset_cappella_url)
+        bool(preset_cappella_url)
         and bool(preset_accompaniment_url)
     )
 
@@ -856,7 +875,7 @@ def handler(job):
                 jlog(f"[Job] F0 from client: {client_song_f0}Hz (skip librosa)")
             else:
                 t = time.time()
-                song_vocal_f0 = analyze_vocal_f0(vocals_path, use_rmvpe=is_test_env)
+                song_vocal_f0 = analyze_vocal_f0(vocals_path, use_rmvpe=True)  # RMVPE 已推平（失败自动兜底 pyin）
                 f0_analysis_time = time.time() - t
                 jlog(f"[Job] F0 Analysis: {f0_analysis_time:.1f}s")
 
@@ -876,12 +895,9 @@ def handler(job):
                     # 会误判男声导致降调电音；共振峰性别模型不受 F0 影响（57 voice 实测
                     # 96-100%），任一信号说"女"就走不降调安全路径（误判成本不对称：
                     # 女判男=电音灾难，男判女=仅贴合度略差）。
-                    # 验证 OK 后想推全量：把下面 is_test_env 判断去掉即可
-                    if is_test_env:
-                        voice_gender, gender_conf, gender_time = classify_gender(voice_path)
-                        is_female = (user_f0 >= 175) or (voice_gender == "female")
-                    else:
-                        is_female = user_f0 >= 175
+                    # 已推平：声学性别 OR F0 阈值（任一说"女"即不降调；模型失败自动回退纯阈值）
+                    voice_gender, gender_conf, gender_time = classify_gender(voice_path)
+                    is_female = (user_f0 >= 175) or (voice_gender == "female")
                     if not is_female:
                         # 男声：F0 通常 85-180Hz，嗓子能 hold 住较大幅度降调，取 3/4
                         # 让歌更贴近男声自然音域，听感顺畅。最小 -12。
@@ -947,14 +963,13 @@ def handler(job):
             # env=test 时启用"cappella 静音段消音"，消除 Seed-VC 前奏/间奏/尾奏幻听
             # vocals_path 在 Stage 2/2.1 结束时仍指向源 cappella（preset 是 preset_cappella.mp3，
             # 老路径是 demucs vocals 或 karaoke lead），Seed-VC 输出在 converted_vocals 独立路径
-            # 验证 OK 后想推全量：把 is_test_env 判断去掉即可
-            cappella_for_mute = vocals_path if is_test_env else None
+            cappella_for_mute = vocals_path  # 消音已推平（基于源人声静音段归零 Seed-VC 幻听）
             mix_audio(converted_vocals, instrumental_path, final_output,
                       vocal_volume=vocal_volume,
                       instrumental_volume=instrumental_volume,
                       reverb=reverb,
                       original_cappella_path=cappella_for_mute,
-                      enable_limiter=is_test_env)  # test 闸门：总线 -1dBFS limiter 防破音
+                      enable_limiter=True)  # 已推平：总线 -1dBFS limiter 防破音
             mix_time = time.time() - t
 
             # ── Stage 5: Format conversion ───────────────────────
@@ -1076,6 +1091,21 @@ def handler(job):
             }
 
 
+def _warmup_models():
+    """后台异步预热：CUDA init + RMVPE + gender 模型。
+    不阻塞接单——不需要模型的请求零影响；需要的请求命中已加载单例，
+    消掉冷启动首单的 10+s 初始化（实测 f0_analysis_time 14.7s 的大头）。"""
+    import time as _t
+    t0 = _t.time()
+    try:
+        _get_rmvpe()
+        _get_gender_model()
+        jlog(f"[Warmup] RMVPE + Gender preloaded in {_t.time()-t0:.1f}s")
+    except Exception as e:
+        jlog(f"[Warmup] failed ({e}) — lazy load will retry on demand")
+
+
 if __name__ == "__main__":
     jlog("[Init] Seed-VC Cover Song Worker v2")
+    _threading.Thread(target=_warmup_models, daemon=True).start()
     runpod.serverless.start({"handler": handler})
