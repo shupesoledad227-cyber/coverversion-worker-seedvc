@@ -710,9 +710,10 @@ def handler(job):
         return info
 
     task_id = job_input.get("task_id", "unknown")
-    # 日志前缀 = request_id（task_id 前 8 位）；worker 单 job 串行，无并发覆盖问题
+    # 日志前缀 = 完整 request_id（task_id）；worker 单 job 串行，无并发覆盖问题
+    # 用完整 ID：服务端拿着 taskId 直接全文搜索即可命中该请求的每一条日志
     global _log_task_id
-    _log_task_id = str(task_id)[:8]
+    _log_task_id = str(task_id)
     song_url = job_input["song_url"]
     voice_url = job_input["voice_url"]
     pitch_shift = int(job_input.get("pitch_shift", 0))
