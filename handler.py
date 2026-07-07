@@ -37,16 +37,17 @@ def jlog(msg):
     _sys.stdout.flush()
 
 
-def download_file(url: str, dest_path: str):
-    """Download a file from URL to local path."""
-    jlog(f"[Download] {url}")
+def download_file(url: str, dest_path: str, label: str = ""):
+    """Download a file from URL to local path. label 标注用途（voice/song/cappella...），并行下载时日志可区分。"""
+    tag = f"({label}) " if label else ""
+    jlog(f"[Download] {tag}{url}")
     resp = requests.get(url, stream=True, timeout=300)
     resp.raise_for_status()
     with open(dest_path, "wb") as f:
         for chunk in resp.iter_content(chunk_size=8192):
             f.write(chunk)
     size_mb = os.path.getsize(dest_path) / (1024 * 1024)
-    jlog(f"[Download] Done: {size_mb:.1f} MB")
+    jlog(f"[Download] {tag}Done: {size_mb:.1f} MB")
 
 
 # 默认封面统一存放于 CDN 加速域名下的固定目录
@@ -793,12 +794,12 @@ def handler(job):
 
             t = time.time()
             # voice 永远要下（用户音色参考）
-            download_file(voice_url, voice_path)
+            download_file(voice_url, voice_path, label="voice")
             # song_url 只在老路径下载——preset 模式下原曲对 worker 无意义
             # （cappella+accompaniment 已是预分离产物，平台歌的客户端可能根本没原曲）
             song_duration = None  # preset 模式下后面从 accompaniment 补算
             if not use_preset_separation:
-                download_file(song_url, song_path)
+                download_file(song_url, song_path, label="song")
                 song_info = torchaudio.info(song_path)
                 song_duration = song_info.num_frames / song_info.sample_rate
             download_time = time.time() - t
@@ -826,8 +827,8 @@ def handler(job):
                 # 两文件并行下载：总耗时 = 慢者而非两者之和（各 ~10MB，串行实测 5.5s → 并行 ~3s）
                 from concurrent.futures import ThreadPoolExecutor
                 with ThreadPoolExecutor(max_workers=2) as _dl:
-                    _f1 = _dl.submit(download_file, preset_cappella_url, vocals_path)
-                    _f2 = _dl.submit(download_file, preset_accompaniment_url, instrumental_path)
+                    _f1 = _dl.submit(download_file, preset_cappella_url, vocals_path, "cappella")
+                    _f2 = _dl.submit(download_file, preset_accompaniment_url, instrumental_path, "accompaniment")
                     _f1.result()
                     _f2.result()
                 separation_engine = "preset"
@@ -988,7 +989,7 @@ def handler(job):
                     cover_url = resolve_cover_url(cover_image)
                     cover_path = os.path.join(tmpdir, "cover.png")
                     try:
-                        download_file(cover_url, cover_path)
+                        download_file(cover_url, cover_path, label="cover_img")
                     except Exception:
                         cover_path = None
                         jlog(f"[Cover] 封面下载失败，跳过")
